@@ -6659,7 +6659,8 @@ function bcGetVercelProxyUrl(targetUrl, isPost) {
   if(isPost) {
     return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy', secret };
   } else {
-    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}`, vercel: false, passBody: false, label: 'vercel-proxy', secret };
+    // GET: pass target as query param; mark vercel:true so bcProxyFetch unwraps the JSON envelope {status_code, body}
+    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}`, vercel: true, passBody: false, label: 'vercel-proxy', secret };
   }
 }
 
@@ -6740,6 +6741,9 @@ async function bcProxyFetch(targetUrl, opts={}){
             ...(opts.extraHeaders||{})
           }
         });
+      } else if(proxy.vercel && proxy.secret){
+        // GET via Vercel proxy — still needs auth header if secret is set
+        fetchOpts.headers['X-API-Key'] = proxy.secret;
       } else if(isPost && proxy.passBody && opts.body){
         fetchOpts.body = opts.body;
       }
@@ -7083,14 +7087,19 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
 
       if(innerStatus === 302 || innerStatus === 301 || innerRedirected || resp.redirected){
         // Real redirect from wp-comments-post.php — definitive success
-        if(hasModeration || lower.includes('moderate') || lower.includes('pending')){
-          return { success:true, moderated:true, msg:`Submitted — awaiting moderation [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
-        }
+        // IMPORTANT: Only treat as moderated if WP explicitly shows a moderation-held page.
+        // Do NOT use loose keywords like 'moderate' or 'pending' — the redirected post page
+        // may contain those words in existing queued comments or plugin text, causing false positives.
         if(hasDuplicate) return { success:true, moderated:false, msg:'Duplicate comment — already exists on this post' };
         if(hasWpError){
           const errMatch = text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
           const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g,'').trim() : 'WordPress returned an error';
           return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
+        }
+        // Only flag moderated if WP shows a specific "your comment is awaiting moderation" page
+        // (this only happens when WP holds the comment and redirects to a special page, not the post page)
+        if(hasModeration && lower.length < 8000){
+          return { success:true, moderated:true, msg:`Submitted — awaiting moderation [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
         }
         return { success:true, moderated:false, msg:`Comment posted — server redirected [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
       }
@@ -7106,6 +7115,12 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
           const errMatch = text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
           const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g,'').trim() : 'WordPress rejected the comment';
           return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
+        }
+        // When Vercel proxy follows the redirect internally, it returns 200 with the full post page.
+        // If we got a large page with no WP error, the comment likely went through.
+        // The post page won't have wp-die or error markers if the comment was accepted.
+        if(isVercelProxy && lower.length > 5000 && !hasWpError){
+          return { success:true, moderated:false, msg:`Comment posted — redirect followed by proxy [vercel-proxy]` };
         }
         // Ambiguous 200 — this is a false positive trap. Skip to next proxy.
         // The proxy likely hit a CDN cache or error page. Don't claim success.

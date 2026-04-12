@@ -6843,22 +6843,56 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
       let json = null;
       try{ json = JSON.parse(text); }catch(e){}
 
-      if(resp.status===201 || resp.status===200){
-        const status = json && json.status;
-        const proxyLbl = proxy.vercel ? 'vercel-proxy' : (proxy.label || (proxy.url||'').split('/')[2] || 'proxy');
-        if(status==='hold') return { success:true, moderated:true, msg:`Comment queued for moderation via REST API [${proxyLbl}] — HTTP ${resp.status}` };
-        return { success:true, moderated:false, msg:`Comment posted via REST API [${proxyLbl}] — HTTP ${resp.status} — ID: ${json&&json.id||'?'}` };
+      // For Vercel proxy: outer resp is always 200 — unwrap the real inner status
+      // For direct/public proxies: resp.status IS the real WP status
+      const innerStatus = (proxy.vercel && json && json.status_code) ? json.status_code
+                        : (proxy.vercel && json && json.status && typeof json.status === 'number') ? json.status
+                        : resp.status;
+      // When proxied, the actual WP JSON response is inside json.body or json.data or json itself
+      const wpJson = (proxy.vercel && json && (json.body || json.data)) ? (json.body || json.data) : json;
+      let wpData = null;
+      if(typeof wpJson === 'string'){ try{ wpData = JSON.parse(wpJson); }catch(e){} }
+      else { wpData = wpJson; }
+
+      const proxyLbl = proxy.vercel ? 'vercel-proxy' : (proxy.label || (proxy.url||'').split('/')[2] || 'proxy');
+
+      // ── REAL SUCCESS: WP returns 201 Created with a comment object ──
+      if(innerStatus === 201 && wpData && wpData.id){
+        const commentStatus = wpData.status;
+        if(commentStatus === 'hold' || commentStatus === 'pending'){
+          return { success:true, moderated:true, msg:`Comment queued for moderation via REST API [${proxyLbl}] — ID: ${wpData.id}` };
+        }
+        return { success:true, moderated:false, msg:`Comment posted via REST API [${proxyLbl}] — ID: ${wpData.id} — Status: ${commentStatus||'approved'}` };
       }
-      if(resp.status===403 && json && json.code==='comment_flood'){
-        return { success:false, moderated:false, msg:'Flood protection — too many comments too fast' };
+
+      // ── 200 with a valid comment object (some WP configs return 200 not 201) ──
+      if((innerStatus === 200 || innerStatus === 201) && wpData && wpData.id && wpData.content){
+        const commentStatus = wpData.status;
+        if(commentStatus === 'hold' || commentStatus === 'pending'){
+          return { success:true, moderated:true, msg:`Comment submitted — pending moderation [${proxyLbl}] — ID: ${wpData.id}` };
+        }
+        return { success:true, moderated:false, msg:`Comment posted via REST API [${proxyLbl}] — ID: ${wpData.id}` };
       }
-      if(resp.status===409){
-        return { success:true, moderated:false, msg:'Duplicate comment — already posted' };
+
+      // ── WP error codes — these come back as 403/400/409 ──
+      const errCode = wpData && wpData.code;
+      const errMsg  = wpData && wpData.message;
+      if(errCode === 'comment_flood')    return { success:false, moderated:false, msg:'Flood protection — slow down between comments' };
+      if(errCode === 'comment_duplicate') return { success:true,  moderated:false, msg:'Duplicate — this comment already exists' };
+      if(errCode === 'rest_comment_invalid_post_id') return { success:false, moderated:false, msg:`Invalid post ID — WP rejected comment`, tryLegacy:true };
+      if(errCode === 'rest_forbidden')   return { success:false, moderated:false, msg:'REST API requires authentication on this site', tryLegacy:true };
+      if(errCode === 'rest_cannot_create') return { success:false, moderated:false, msg:'REST API blocked comment creation', tryLegacy:true };
+      if(errCode)                        return { success:false, moderated:false, msg:`WP REST error: ${errCode} — ${(errMsg||'').slice(0,100)}`, tryLegacy:true };
+
+      if(innerStatus === 409) return { success:true, moderated:false, msg:'Duplicate comment — already posted' };
+      if(innerStatus === 401 || innerStatus === 403 || innerStatus === 404){
+        return { success:false, moderated:false, msg:`REST API returned ${innerStatus} — falling back to form POST`, tryLegacy:true };
       }
-      // 401/403 = auth needed, 404 = no REST, fallback to legacy
-      if(resp.status===401 || resp.status===403 || resp.status===404){
-        return { success:false, moderated:false, msg:`REST API returned ${resp.status}`, tryLegacy:true };
-      }
+      if(innerStatus >= 500){ continue; }
+
+      // ── Catch-all: got a 200 but no valid comment object → NOT a real success ──
+      // This is where false positives were coming from (proxy returning WP error page as 200)
+      continue;
     } catch(e){ continue; }
   }
   return { success:false, moderated:false, msg:'REST API unreachable via all proxies', tryLegacy:true };
@@ -6977,46 +7011,90 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),18000))
       ]);
 
-      const text = await resp.text();
-      const lower = text.toLowerCase();
+      let rawText = '';
+      try { rawText = await resp.text(); } catch(e) { continue; }
 
-      if(resp.redirected || resp.status===302 || resp.status===301){
-        if(lower.includes('moderate')||lower.includes('pending')||lower.includes('awaiting')){
-          return { success:true, moderated:true, msg:'Submitted — awaiting moderation' };
+      // For Vercel proxy: resp.status is always 200 (outer wrapper).
+      // Unwrap the real inner WP status and body.
+      let innerStatus = resp.status;
+      let text = rawText;
+      if(isVercelProxy){
+        let outerJson = null;
+        try { outerJson = JSON.parse(rawText); } catch(e) {}
+        if(outerJson){
+          innerStatus = outerJson.status_code || outerJson.status || resp.status;
+          // body might be a string or already parsed
+          if(typeof outerJson.body === 'string') text = outerJson.body;
+          else if(typeof outerJson.text === 'string') text = outerJson.text;
+          else if(outerJson.body) try { text = JSON.stringify(outerJson.body); } catch(e){}
         }
-        return { success:true, moderated:false, msg:'Comment posted (server redirected = success)' };
       }
 
-      if(resp.status===200){
-        if(lower.includes('your comment is awaiting')||lower.includes('pending moderation')){
-          return { success:true, moderated:true, msg:'Comment submitted — pending moderation' };
+      const lower = text.toLowerCase();
+
+      // ── WP error signals — check FIRST before any success path ──
+      // wp-comments-post.php never returns 200 on success (only on error/die)
+      const hasWpError = lower.includes('wp-die') || lower.includes('wordpress › error')
+                      || lower.includes('<title>error') || lower.includes('comment_post_id')
+                      || lower.includes('sorry, you must be') || lower.includes('error: ')
+                      || lower.includes('you are posting too quickly')
+                      || lower.includes('duplicate comment') && lower.includes('wp');
+
+      // ── Moderation signals ──
+      const hasModeration = lower.includes('your comment is awaiting')
+                         || lower.includes('pending moderation')
+                         || lower.includes('awaiting moderation')
+                         || lower.includes('held for moderation');
+
+      // ── Duplicate signals ──
+      const hasDuplicate = lower.includes('duplicate comment') || lower.includes('already said that');
+
+      // ── Real success signals: page redirected back to the post with #comment-N ──
+      // wp-comments-post.php on success does a 302 redirect to the post page
+      // The proxy follows it and gives us the post page HTML or just a redirect signal
+      const hasSuccessSignal =
+        lower.includes('#comment-') ||                    // anchor to new comment
+        (lower.includes('comment-') && lower.includes('commentlist')) || // comment in list
+        lower.includes('comment posted successfully') ||
+        lower.includes('thanks for commenting') ||
+        lower.includes('your comment has been');
+
+      if(innerStatus === 302 || innerStatus === 301 || resp.redirected){
+        // Real redirect from wp-comments-post.php — definitive success
+        if(hasModeration || lower.includes('moderate') || lower.includes('pending')){
+          return { success:true, moderated:true, msg:`Submitted — awaiting moderation [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
         }
-        if(lower.includes('duplicate')||lower.includes('already said that')){
-          return { success:true, moderated:false, msg:'Duplicate — already posted' };
-        }
-        // Strong success signals
-        if(
-          lower.includes('comment-')||lower.includes('commentlist')||
-          lower.includes('#comment-')||lower.includes('comment posted')||
-          lower.includes('thanks for')
-        ){
-          return { success:true, moderated:false, msg:'Comment posted (HTTP 200, success signals detected)' };
-        }
-        // WP error signals
-        if(lower.includes('wp-die')||lower.includes('<p>sorry')||lower.includes('error')){
-          const errMatch = text.match(/<p[^>]*>([\s\S]{10,300}?)<\/p>/i);
+        if(hasDuplicate) return { success:true, moderated:false, msg:'Duplicate comment — already exists on this post' };
+        if(hasWpError){
+          const errMatch = text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
           const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g,'').trim() : 'WordPress returned an error';
           return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
         }
-        // Ambiguous 200 — treat as likely success
-        return { success:true, moderated:true, msg:'Submitted (HTTP 200 — verify on site to confirm)' };
+        return { success:true, moderated:false, msg:`Comment posted — server redirected [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
       }
 
-      if(resp.status===403) return { success:false, moderated:false, msg:'403 Forbidden — nonce expired, spam filter, or Cloudflare blocking' };
-      if(resp.status===404) return { success:false, moderated:false, msg:'404 — wp-comments-post.php not found on this site' };
-      if(resp.status===429) return { success:false, moderated:false, msg:'429 Rate limited — wait before retrying' };
-      if(resp.status===409) return { success:true, moderated:false, msg:'409 Conflict — likely duplicate, comment may already exist' };
-      if(resp.status>=500){ continue; } // server error, try next proxy
+      if(innerStatus === 200){
+        // 200 from wp-comments-post.php almost always means WP error/die page
+        // Only accept as success if we see concrete success signals
+        if(hasModeration) return { success:true, moderated:true, msg:`Comment submitted — pending moderation [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
+        if(hasDuplicate)  return { success:true, moderated:false, msg:'Duplicate comment — already exists' };
+        if(hasSuccessSignal && !hasWpError) return { success:true, moderated:false, msg:`Comment posted — success signals confirmed [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
+        // WP error — extract message and report failure
+        if(hasWpError){
+          const errMatch = text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
+          const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g,'').trim() : 'WordPress rejected the comment';
+          return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
+        }
+        // Ambiguous 200 — this is a false positive trap. Skip to next proxy.
+        // The proxy likely hit a CDN cache or error page. Don't claim success.
+        continue;
+      }
+
+      if(innerStatus===403) return { success:false, moderated:false, msg:'403 Forbidden — nonce expired, spam filter, or Cloudflare WAF blocking' };
+      if(innerStatus===404) return { success:false, moderated:false, msg:'404 — wp-comments-post.php not found (site may use custom endpoint)' };
+      if(innerStatus===429) return { success:false, moderated:false, msg:'429 Rate limited — too many comments too fast' };
+      if(innerStatus===409) return { success:true, moderated:false, msg:'409 Conflict — comment likely already exists' };
+      if(innerStatus>=500){ continue; }
 
     } catch(e){ continue; }
   }
@@ -7129,22 +7207,57 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
         fetch(gUrl, gFetchOpts),
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),16000))
       ]);
-      const text = await resp.text();
-      const lower = text.toLowerCase();
+      let gRawText = '';
+      try { gRawText = await resp.text(); } catch(e) { continue; }
+
+      // Unwrap Vercel proxy envelope to get real inner status + body
+      let gInnerStatus = resp.status;
+      let gText = gRawText;
+      if(isVercel){
+        let gOuter = null;
+        try { gOuter = JSON.parse(gRawText); } catch(e) {}
+        if(gOuter){
+          gInnerStatus = gOuter.status_code || gOuter.status || resp.status;
+          if(typeof gOuter.body === 'string') gText = gOuter.body;
+          else if(typeof gOuter.text === 'string') gText = gOuter.text;
+        }
+      }
+
+      const lower = gText.toLowerCase();
       const proxyLabel = isVercel ? 'vercel-proxy' : (gProxy.label || gUrl.split('/')[2] || gUrl.slice(0,30));
-      if(resp.status===201||resp.redirected||(resp.status===200&&(lower.includes('thank')||lower.includes('success')||lower.includes('posted')||lower.includes('received')||lower.includes('submitt')))){
-        logFn(`   ✅ Generic form: HTTP ${resp.status} success via [${proxyLabel}]`,'success');
-        return { success:true, moderated:false, msg:`Generic form submitted (HTTP ${resp.status}) via ${proxyLabel}` };
+
+      // ── Moderation signals ──
+      const gModerated = lower.includes('awaiting') || lower.includes('moderat') || lower.includes('pending') || lower.includes('held for');
+      // ── Definitive success signals (content-level proof) ──
+      const gSuccess = lower.includes('thank you') || lower.includes('thanks for') || lower.includes('comment posted')
+                    || lower.includes('comment submitted') || lower.includes('your comment') || lower.includes('received your')
+                    || lower.includes('successfully submitted') || lower.includes('been submitted');
+      // ── Error signals to prevent false positives ──
+      const gError = lower.includes('error') || lower.includes('invalid') || lower.includes('failed')
+                  || lower.includes('spam') || lower.includes('blocked') || lower.includes('wp-die');
+
+      if(gInnerStatus === 201 || (gInnerStatus === 302) || resp.redirected){
+        if(gModerated){
+          logFn(`   ⏳ Generic form: pending moderation via [${proxyLabel}]`,'success');
+          return { success:true, moderated:true, msg:`Submitted — pending moderation (HTTP ${gInnerStatus}) via ${proxyLabel}` };
+        }
+        logFn(`   ✅ Generic form: HTTP ${gInnerStatus} success via [${proxyLabel}]`,'success');
+        return { success:true, moderated:false, msg:`Generic form submitted (HTTP ${gInnerStatus}) via ${proxyLabel}` };
       }
-      if(lower.includes('awaiting')||lower.includes('moderat')||lower.includes('pending')){
-        logFn(`   ⏳ Generic form: pending moderation via [${proxyLabel}]`,'success');
-        return { success:true, moderated:true, msg:`Submitted — pending moderation (HTTP ${resp.status}) via ${proxyLabel}` };
+      if(gInnerStatus === 200){
+        if(gModerated && !gError){
+          logFn(`   ⏳ Generic form: pending moderation via [${proxyLabel}]`,'success');
+          return { success:true, moderated:true, msg:`Submitted — pending moderation via ${proxyLabel}` };
+        }
+        if(gSuccess && !gError){
+          logFn(`   ✅ Generic form: success signals confirmed via [${proxyLabel}]`,'success');
+          return { success:true, moderated:false, msg:`Generic form submitted — confirmed via ${proxyLabel}` };
+        }
+        // 200 with no success signals = likely error page or proxy wrapper. Skip.
+        logFn(`   ⚠ Generic: HTTP 200 but no success signals via [${proxyLabel}] — trying next proxy`,'warn');
+        continue;
       }
-      if(resp.status>=200&&resp.status<400){
-        logFn(`   ⏳ Generic form: HTTP ${resp.status} via [${proxyLabel}] — verify on site`,'warn');
-        return { success:true, moderated:true, msg:`Submitted (HTTP ${resp.status}) via ${proxyLabel} — verify on site` };
-      }
-      logFn(`   ⚠ Generic: HTTP ${resp.status} via [${proxyLabel}] — trying next proxy`,'warn');
+      logFn(`   ⚠ Generic: HTTP ${gInnerStatus} via [${proxyLabel}] — trying next proxy`,'warn');
     } catch(e){ continue; }
   }
   return { success:false, moderated:false, msg:'Generic POST failed — site likely blocks proxy IPs. Use Manual Assist.' };

@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6749,16 +6750,30 @@ async function bcProxyFetch(targetUrl, opts={}){
       ]);
 
       let text = '';
-      if(proxy.json && resp.ok){
-        try{ const d=await resp.json(); text=d.contents||''; }catch(e){ text=await resp.text(); }
+      let realStatus = resp.status;
+      let realRedirected = resp.redirected;
+
+      if(proxy.vercel){
+        // Our Vercel proxy always returns 200 with a JSON envelope.
+        // Unwrap to get the real upstream status_code, body, and redirect flag.
+        try{
+          const envelope = await resp.json();
+          realStatus    = envelope.status_code || resp.status;
+          realRedirected= envelope.redirected  || false;
+          text          = envelope.body || envelope.text || '';
+        }catch(e){
+          text = await resp.text().catch(()=>'');
+        }
+      } else if(proxy.json && resp.ok){
+        try{ const d=await resp.json(); text=d.contents||''; }catch(e){ text=await resp.text().catch(()=>''); }
       } else {
-        text = await resp.text();
+        text = await resp.text().catch(()=>'');
       }
 
-      // Consider 4xx/5xx as failed for GET (for POST we check caller)
-      if(!isPost && !resp.ok && resp.status >= 500){ continue; }
+      // Skip 5xx from public proxies (try next)
+      if(!proxy.vercel && !isPost && realStatus >= 500){ continue; }
 
-      return { ok: resp.ok, status: resp.status, text, redirected: resp.redirected, proxy: proxy.label||proxy.url };
+      return { ok: realStatus >= 200 && realStatus < 400, status: realStatus, text, redirected: realRedirected, proxy: proxy.label||proxy.url };
     } catch(e){
       continue;
     }
@@ -6839,20 +6854,26 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),16000))
       ]);
 
-      const text = await resp.text();
+      let rawText = '';
+      try{ rawText = await resp.text(); }catch(e){ continue; }
       let json = null;
-      try{ json = JSON.parse(text); }catch(e){}
+      try{ json = JSON.parse(rawText); }catch(e){}
 
-      // For Vercel proxy: outer resp is always 200 — unwrap the real inner status
-      // For direct/public proxies: resp.status IS the real WP status
-      const innerStatus = (proxy.vercel && json && json.status_code) ? json.status_code
-                        : (proxy.vercel && json && json.status && typeof json.status === 'number') ? json.status
-                        : resp.status;
-      // When proxied, the actual WP JSON response is inside json.body or json.data or json itself
-      const wpJson = (proxy.vercel && json && (json.body || json.data)) ? (json.body || json.data) : json;
+      // Vercel proxy: always 200 outer, real status in json.status_code, real body in json.body/json.text
+      let innerStatus = resp.status;
       let wpData = null;
-      if(typeof wpJson === 'string'){ try{ wpData = JSON.parse(wpJson); }catch(e){} }
-      else { wpData = wpJson; }
+      if(proxy.vercel && json && json.status_code !== undefined){
+        innerStatus = json.status_code;
+        const innerBody = json.body || json.text || '';
+        if(typeof innerBody === 'string'){
+          try{ wpData = JSON.parse(innerBody); }catch(e){ wpData = null; }
+        } else if(typeof innerBody === 'object'){
+          wpData = innerBody;
+        }
+      } else {
+        // Direct / public proxy: resp.status is real, rawText is the WP JSON
+        wpData = json;
+      }
 
       const proxyLbl = proxy.vercel ? 'vercel-proxy' : (proxy.label || (proxy.url||'').split('/')[2] || 'proxy');
 
@@ -7014,19 +7035,20 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       let rawText = '';
       try { rawText = await resp.text(); } catch(e) { continue; }
 
-      // For Vercel proxy: resp.status is always 200 (outer wrapper).
-      // Unwrap the real inner WP status and body.
+      // Vercel proxy always wraps response in JSON envelope with status_code + body.
+      // Public proxies pass through the raw response directly.
       let innerStatus = resp.status;
       let text = rawText;
+      let innerRedirected = resp.redirected;
       if(isVercelProxy){
         let outerJson = null;
         try { outerJson = JSON.parse(rawText); } catch(e) {}
-        if(outerJson){
-          innerStatus = outerJson.status_code || outerJson.status || resp.status;
-          // body might be a string or already parsed
-          if(typeof outerJson.body === 'string') text = outerJson.body;
-          else if(typeof outerJson.text === 'string') text = outerJson.text;
-          else if(outerJson.body) try { text = JSON.stringify(outerJson.body); } catch(e){}
+        if(outerJson && outerJson.status_code !== undefined){
+          innerStatus    = outerJson.status_code;
+          innerRedirected= outerJson.redirected || false;
+          if(typeof outerJson.body === 'string')       text = outerJson.body;
+          else if(typeof outerJson.text === 'string')  text = outerJson.text;
+          else if(outerJson.body) try{ text = JSON.stringify(outerJson.body); }catch(e){}
         }
       }
 
@@ -7059,7 +7081,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
         lower.includes('thanks for commenting') ||
         lower.includes('your comment has been');
 
-      if(innerStatus === 302 || innerStatus === 301 || resp.redirected){
+      if(innerStatus === 302 || innerStatus === 301 || innerRedirected || resp.redirected){
         // Real redirect from wp-comments-post.php — definitive success
         if(hasModeration || lower.includes('moderate') || lower.includes('pending')){
           return { success:true, moderated:true, msg:`Submitted — awaiting moderation [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
@@ -7210,16 +7232,18 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
       let gRawText = '';
       try { gRawText = await resp.text(); } catch(e) { continue; }
 
-      // Unwrap Vercel proxy envelope to get real inner status + body
+      // Vercel proxy wraps in JSON envelope — unwrap to get real status + body
       let gInnerStatus = resp.status;
       let gText = gRawText;
+      let gInnerRedirected = resp.redirected;
       if(isVercel){
         let gOuter = null;
         try { gOuter = JSON.parse(gRawText); } catch(e) {}
-        if(gOuter){
-          gInnerStatus = gOuter.status_code || gOuter.status || resp.status;
-          if(typeof gOuter.body === 'string') gText = gOuter.body;
-          else if(typeof gOuter.text === 'string') gText = gOuter.text;
+        if(gOuter && gOuter.status_code !== undefined){
+          gInnerStatus     = gOuter.status_code;
+          gInnerRedirected = gOuter.redirected || false;
+          if(typeof gOuter.body === 'string')       gText = gOuter.body;
+          else if(typeof gOuter.text === 'string')  gText = gOuter.text;
         }
       }
 
@@ -7236,7 +7260,7 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
       const gError = lower.includes('error') || lower.includes('invalid') || lower.includes('failed')
                   || lower.includes('spam') || lower.includes('blocked') || lower.includes('wp-die');
 
-      if(gInnerStatus === 201 || (gInnerStatus === 302) || resp.redirected){
+      if(gInnerStatus === 201 || gInnerStatus === 302 || gInnerStatus === 301 || gInnerRedirected || resp.redirected){
         if(gModerated){
           logFn(`   ⏳ Generic form: pending moderation via [${proxyLabel}]`,'success');
           return { success:true, moderated:true, msg:`Submitted — pending moderation (HTTP ${gInnerStatus}) via ${proxyLabel}` };

@@ -6651,12 +6651,28 @@ function bcTermSeparator(label){
 // Custom proxy endpoint can be set by user (Cloudflare Worker, etc.)
 let _bcCustomProxy = localStorage.getItem('bc_custom_proxy')||'';
 
+function bcGetVercelProxyUrl(targetUrl, isPost) {
+  // Use YOUR Vercel backend as proxy — avoids public proxy IP bans
+  const vercelBase = (settingGet('vercel_url')||_HARDCODED_SUPA_URL.replace('supabase.co','vercel.app')||'').replace(/\/+$/,'');
+  const apiBase = vercelBase || 'https://seoparapro.vercel.app';
+  if(isPost) {
+    // For POST: send as JSON body to our proxy
+    return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy' };
+  } else {
+    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}`, vercel: false, passBody: false, label: 'vercel-proxy' };
+  }
+}
+
 function bcGetProxyList(targetUrl, isPost){
   const enc = encodeURIComponent(targetUrl);
   const custom = _bcCustomProxy.trim();
   const list = [];
 
-  // Custom proxy first (user-provided Cloudflare Worker or similar)
+  // 1. YOUR Vercel proxy FIRST — real server IP, not a known proxy, bypasses Cloudflare
+  const vercelProxy = bcGetVercelProxyUrl(targetUrl, isPost);
+  list.push(vercelProxy);
+
+  // 2. Custom proxy second (user-provided Cloudflare Worker or similar)
   if(custom){
     list.push({ url: custom.replace('{URL}', enc).replace('{url}', enc) || `${custom}?url=${enc}`, passBody: isPost, label:'custom' });
   }
@@ -6683,7 +6699,6 @@ function bcGetProxyList(targetUrl, isPost){
       { url: `https://yacdn.org/serve/${targetUrl}`, passBody: false, label:'yacdn' },
       { url: `https://cors.eu.org/${targetUrl}`, passBody: false, label:'cors.eu.org' },
       { url: `https://corsproxy.org/?${enc}`, passBody: false, label:'corsproxy.org' },
-      { url: `https://api.codetabs.com/v1/proxy?quest=${enc}`, passBody: false, label:'codetabs2' },
       { url: `https://corsproxy.club/?${targetUrl}`, passBody: false, label:'corsproxy.club' },
     );
   }
@@ -6711,7 +6726,20 @@ async function bcProxyFetch(targetUrl, opts={}){
       }
       if(opts.asJson) fetchOpts.headers['Content-Type'] = 'application/json';
 
-      if(isPost && proxy.passBody && opts.body){
+      // For Vercel proxy POST: wrap target URL + body in JSON envelope
+      if(isPost && proxy.vercel && opts.body){
+        fetchOpts.headers['Content-Type'] = 'application/json';
+        fetchOpts.body = JSON.stringify({
+          url: targetUrl,
+          method: opts.method || 'POST',
+          body: opts.body,
+          headers: {
+            'Content-Type': opts.contentType || 'application/x-www-form-urlencoded',
+            'Referer': targetUrl,
+            ...(opts.extraHeaders||{})
+          }
+        });
+      } else if(isPost && proxy.passBody && opts.body){
         fetchOpts.body = opts.body;
       }
 
@@ -6780,7 +6808,10 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
   const body = JSON.stringify(payload);
 
   // Try multiple proxies for JSON POST
+  const _vBase = (settingGet('vercel_url')||'https://seoparapro.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
+    // Vercel proxy FIRST — real IP, bypasses Cloudflare/spam filters
+    { url: `${_vBase}/api/proxy`, vercel: true, direct: false },
     { url: restEndpoint, direct: true },
     { url: `https://corsproxy.io/?${encodeURIComponent(restEndpoint)}`, direct: false },
     { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(restEndpoint)}`, direct: false },
@@ -6794,12 +6825,17 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
 
   for(const proxy of proxyTargets){
     try {
+      const restFetchOpts = proxy.vercel ? {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: restEndpoint, method: 'POST', body: payload, headers: { 'Content-Type': 'application/json' } })
+      } : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(proxy.extraHeaders||{}) },
+        body
+      };
       const resp = await Promise.race([
-        fetch(proxy.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(proxy.extraHeaders||{}) },
-          body
-        }),
+        fetch(proxy.url, restFetchOpts),
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),16000))
       ]);
 
@@ -6893,31 +6929,49 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
   }
 
   // Referrer header mimics a real browser navigating from the post page
+  const _vBase2 = (settingGet('vercel_url')||'https://seoparapro.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
-    `https://corsproxy.io/?${encodeURIComponent(postUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(postUrl)}`,
-    `https://thingproxy.freeboard.io/fetch/${postUrl}`,
-    `https://proxy.cors.sh/${postUrl}`,
-    `https://crossorigin.me/${postUrl}`,
-    `https://yacdn.org/serve/${postUrl}`,
+    // Vercel proxy FIRST — real server IP bypasses most blocks
+    { vercel: true, url: `${_vBase2}/api/proxy` },
+    { url: `https://corsproxy.io/?${encodeURIComponent(postUrl)}` },
+    { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(postUrl)}` },
+    { url: `https://thingproxy.freeboard.io/fetch/${postUrl}` },
+    { url: `https://proxy.cors.sh/${postUrl}` },
+    { url: `https://crossorigin.me/${postUrl}` },
+    { url: `https://yacdn.org/serve/${postUrl}` },
   ];
   if(_bcCustomProxy){
     const enc = encodeURIComponent(postUrl);
-    proxyTargets.unshift(_bcCustomProxy.replace('{URL}',enc).replace('{url}',enc) || `${_bcCustomProxy}?url=${enc}`);
+    proxyTargets.unshift({ url: _bcCustomProxy.replace('{URL}',enc).replace('{url}',enc) || `${_bcCustomProxy}?url=${enc}` });
   }
 
   for(const proxyUrl of proxyTargets){
     try {
-      const resp = await Promise.race([
-        fetch(proxyUrl, {
+      const isVercelProxy = proxy && proxy.vercel;
+      const legacyFetchOpts = isVercelProxy ? {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: postUrl,
           method: 'POST',
+          body: params.toString(),
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': pageUrl,
-            'Origin': new URL(pageUrl).origin,
-          },
-          body: params.toString()
-        }),
+            'Origin': new URL(pageUrl).origin
+          }
+        })
+      } : {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Referer': pageUrl,
+          'Origin': new URL(pageUrl).origin,
+        },
+        body: params.toString()
+      };
+      const resp = await Promise.race([
+        fetch(isVercelProxy ? proxy.url : proxyUrl, legacyFetchOpts),
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),18000))
       ]);
 

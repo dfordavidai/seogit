@@ -6653,13 +6653,12 @@ let _bcCustomProxy = localStorage.getItem('bc_custom_proxy')||'';
 
 function bcGetVercelProxyUrl(targetUrl, isPost) {
   // Use YOUR Vercel backend as proxy — avoids public proxy IP bans
-  const vercelBase = (settingGet('vercel_url')||_HARDCODED_SUPA_URL.replace('supabase.co','vercel.app')||'').replace(/\/+$/,'');
-  const apiBase = vercelBase || 'https://seoparapro.vercel.app';
+  const apiBase = (railwayUrl() || 'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const secret  = railwaySecret(); // X-API-Key from Settings → Vercel Secret Key
   if(isPost) {
-    // For POST: send as JSON body to our proxy
-    return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy' };
+    return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy', secret };
   } else {
-    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}`, vercel: false, passBody: false, label: 'vercel-proxy' };
+    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}`, vercel: false, passBody: false, label: 'vercel-proxy', secret };
   }
 }
 
@@ -6726,9 +6725,10 @@ async function bcProxyFetch(targetUrl, opts={}){
       }
       if(opts.asJson) fetchOpts.headers['Content-Type'] = 'application/json';
 
-      // For Vercel proxy POST: wrap target URL + body in JSON envelope
+      // For Vercel proxy POST: wrap target URL + body in JSON envelope + send API key
       if(isPost && proxy.vercel && opts.body){
         fetchOpts.headers['Content-Type'] = 'application/json';
+        if(proxy.secret) fetchOpts.headers['X-API-Key'] = proxy.secret;
         fetchOpts.body = JSON.stringify({
           url: targetUrl,
           method: opts.method || 'POST',
@@ -6808,7 +6808,7 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
   const body = JSON.stringify(payload);
 
   // Try multiple proxies for JSON POST
-  const _vBase = (settingGet('vercel_url')||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (railwayUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
     // Vercel proxy FIRST — real IP, bypasses Cloudflare/spam filters
     { url: `${_vBase}/api/proxy`, vercel: true, direct: false },
@@ -6827,7 +6827,7 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
     try {
       const restFetchOpts = proxy.vercel ? {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(railwaySecret() ? {'X-API-Key': railwaySecret()} : {}) },
         body: JSON.stringify({ url: restEndpoint, method: 'POST', body: payload, headers: { 'Content-Type': 'application/json' } })
       } : {
         method: 'POST',
@@ -6929,7 +6929,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
   }
 
   // Referrer header mimics a real browser navigating from the post page
-  const _vBase2 = (settingGet('vercel_url')||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase2 = (railwayUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
     // Vercel proxy FIRST — real server IP bypasses most blocks
     { vercel: true, url: `${_vBase2}/api/proxy` },
@@ -6950,7 +6950,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       const isVercelProxy = proxy && proxy.vercel;
       const legacyFetchOpts = isVercelProxy ? {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(railwaySecret() ? {'X-API-Key': railwaySecret()} : {}) },
         body: JSON.stringify({
           url: postUrl,
           method: 'POST',

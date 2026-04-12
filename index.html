@@ -17965,14 +17965,38 @@ async function waitIfPaused(){ while(CAMPAIGN_CTRL.paused){ await sleep(500); } 
 })();
 // Init blacklist from localStorage — must happen before any BL usage
 try { BL.items = JSON.parse(localStorage.getItem('blacklist')||'[]'); } catch(e){ BL.items=[]; }
-// Init Supabase if previously connected
-// Auto-seed hardcoded credentials if fields are empty
-if(!settingGet('supa_url')) settingSet('supa_url', _HARDCODED_SUPA_URL);
-if(!settingGet('supa_anon_key')) settingSet('supa_anon_key', _HARDCODED_SUPA_KEY);
-if(settingGet('supa_connected')&&settingGet('supa_url')&&settingGet('supa_anon_key')){
-  supaUpdateHeaderPill();
-  if(settingGet('supa_autosync')) supaLoadAll().catch(()=>{});
-}
+// Auto-connect Supabase on every page load — no localStorage dependency
+settingSet('supa_url', _HARDCODED_SUPA_URL);
+settingSet('supa_anon_key', _HARDCODED_SUPA_KEY);
+(async () => {
+  try {
+    const res = await fetch(_HARDCODED_SUPA_URL + '/rest/v1/', {
+      method: 'GET',
+      headers: {
+        'apikey': _HARDCODED_SUPA_KEY,
+        'Authorization': 'Bearer ' + _HARDCODED_SUPA_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+    if(res.ok || res.status === 404 || res.status === 200) {
+      SUPA.connected = true;
+      settingSet('supa_connected', true);
+      supaUpdateHeaderPill();
+      console.log('[Supabase] Auto-connected ✓ status:', res.status);
+      if(settingGet('supa_autosync')) supaLoadAll().catch(()=>{});
+    } else {
+      console.warn('[Supabase] Auto-connect failed, status:', res.status);
+      SUPA.connected = false;
+      settingSet('supa_connected', false);
+      supaUpdateHeaderPill();
+    }
+  } catch(e) {
+    console.warn('[Supabase] Auto-connect error:', e.message);
+    SUPA.connected = false;
+    settingSet('supa_connected', false);
+    supaUpdateHeaderPill();
+  }
+})();
 // Re-call updateHeader/PlatformBar now that DOM + all vars are ready, then render dashboard
 updatePlatformBar();
 updateHeader();

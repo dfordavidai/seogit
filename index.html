@@ -14197,11 +14197,11 @@ const SETTINGS_DEFAULTS = {
   vercel_secret:         '',
   vercel_enabled:        false,
   railway_timeout:       15000,
-  supa_url:              '',
-  supa_anon_key:         '',
+  supa_url:              'https://zamwlorvstesvxvvzijo.supabase.co',
+  supa_anon_key:         'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphbXdsb3J2c3Rlc3Z4dnZ6aWpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYwMDA1MzQsImV4cCI6MjA5MTU3NjUzNH0.Uk3m073ljJHadb8z1v9ftcUKxOODp-APKSyI0Xh5-Ac',
   supa_service_key:      '',
   supa_connected:        false,
-  supa_prefix:           '',
+  supa_prefix:           'seo_',
   supa_autosync:         false,
 
   // ── GROQ AI ──
@@ -15379,8 +15379,10 @@ const SUPA = {
   realtimeChannel: null,
 };
 
-function supaUrl(){ return settingGet('supa_url')||''; }
-function supaKey(){ return settingGet('supa_anon_key')||''; }
+const _HARDCODED_SUPA_URL = 'https://zamwlorvstesvxvvzijo.supabase.co';
+const _HARDCODED_SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphbXdsb3J2c3Rlc3Z4dnZ6aWpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYwMDA1MzQsImV4cCI6MjA5MTU3NjUzNH0.Uk3m073ljJHadb8z1v9ftcUKxOODp-APKSyI0Xh5-Ac';
+function supaUrl(){ return (settingGet('supa_url')||'').trim() || _HARDCODED_SUPA_URL; }
+function supaKey(){ return (settingGet('supa_anon_key')||'').trim() || _HARDCODED_SUPA_KEY; }
 function supaPrefix(){ return settingGet('supa_prefix')||'seo_'; }
 
 function supaHeaders(service=false){
@@ -15410,37 +15412,12 @@ async function supaFetch(endpoint, method='GET', body=null, useService=false){
 }
 
 async function supaTestConnection(){
-  // Read directly from DOM - bypass any caching issues
-  const urlInput = document.getElementById('setting-supa_url');
-  const keyInput = document.getElementById('setting-supa_anon_key');
-
-  let url = (urlInput ? urlInput.value : supaUrl()).trim().replace(/\/+$/, '');
-  let key = (keyInput ? keyInput.value : supaKey()).trim();
-
-  // Save whatever we read
-  if(url) settingSet('supa_url', url);
-  if(key) settingSet('supa_anon_key', key);
+  // Always use hardcoded as ultimate fallback
+  const url = (supaUrl()||'').trim().replace(/\/+$/, '') || _HARDCODED_SUPA_URL;
+  const key = (supaKey()||'').trim() || _HARDCODED_SUPA_KEY;
 
   const statusEl = document.getElementById('supa-status-msg');
-  const debugEl  = document.getElementById('supa-debug-out');
-
-  if(!url || !key){
-    toast('Enter Project URL and Anon Key first','e');
-    return;
-  }
-  if(!url.startsWith('http')) url = 'https://' + url;
-
-  const debugInfo = [
-    '🔍 DEBUG INFO:',
-    'URL: ' + url,
-    'Key (first 20): ' + key.slice(0,20) + '...',
-    'Key length: ' + key.length,
-    'Key starts with eyJ: ' + key.startsWith('eyJ'),
-    'Testing endpoint: ' + url + '/rest/v1/',
-  ].join('\n');
-
-  if(debugEl) debugEl.textContent = debugInfo;
-  if(statusEl) statusEl.innerHTML = '<span style="color:#888">⟳ Testing...</span>';
+  if(statusEl) statusEl.innerHTML = '<span style="color:#aaa">⟳ Connecting to Supabase...</span>';
 
   try {
     const res = await fetch(url + '/rest/v1/', {
@@ -15452,33 +15429,28 @@ async function supaTestConnection(){
       }
     });
 
-    const bodyText = await res.text().catch(() => '');
-    const fullDebug = debugInfo + '\n\nRESPONSE:\nStatus: ' + res.status + ' ' + res.statusText + '\nBody: ' + bodyText.slice(0, 300);
-    if(debugEl) debugEl.textContent = fullDebug;
+    const body = await res.text().catch(() => '');
+    console.log('[Supa Test] Status:', res.status, 'Body:', body.slice(0,200));
 
     if(res.ok || res.status === 200 || res.status === 404){
       SUPA.connected = true;
       settingSet('supa_connected', true);
+      settingSet('supa_url', url);
+      settingSet('supa_anon_key', key);
       supaUpdateHeaderPill();
-      if(statusEl) statusEl.innerHTML = '<span style="color:#3ecf8e">✓ Connected! Status: ' + res.status + '</span>';
-      toast('Supabase connected!','s');
+      if(statusEl) statusEl.innerHTML = '<span style="color:#3ecf8e">✓ Connected to Supabase!</span>';
+      toast('✓ Supabase connected!','s');
     } else if(res.status === 401){
-      SUPA.connected = false;
-      settingSet('supa_connected', false);
-      supaUpdateHeaderPill();
-      if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ 401 — Key rejected. See debug below.</span>';
-      toast('401 — Anon key rejected by Supabase','e');
+      if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ 401 — ' + body.slice(0,150) + '</span>';
+      toast('Supabase 401: ' + body.slice(0,80),'e');
     } else {
-      throw new Error('HTTP ' + res.status + ' — ' + bodyText.slice(0,100));
+      if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ HTTP ' + res.status + ' — ' + body.slice(0,100) + '</span>';
+      toast('Supabase error: HTTP ' + res.status,'e');
     }
   } catch(e){
-    const errDebug = debugInfo + '\n\nERROR: ' + e.message;
-    if(debugEl) debugEl.textContent = errDebug;
-    SUPA.connected = false;
-    settingSet('supa_connected', false);
-    supaUpdateHeaderPill();
     if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ ' + e.message + '</span>';
-    toast('Connection failed: ' + e.message,'e');
+    toast('Connection error: ' + e.message,'e');
+    console.error('[Supa Test] Error:', e);
   }
 }
 
@@ -17994,6 +17966,9 @@ async function waitIfPaused(){ while(CAMPAIGN_CTRL.paused){ await sleep(500); } 
 // Init blacklist from localStorage — must happen before any BL usage
 try { BL.items = JSON.parse(localStorage.getItem('blacklist')||'[]'); } catch(e){ BL.items=[]; }
 // Init Supabase if previously connected
+// Auto-seed hardcoded credentials if fields are empty
+if(!settingGet('supa_url')) settingSet('supa_url', _HARDCODED_SUPA_URL);
+if(!settingGet('supa_anon_key')) settingSet('supa_anon_key', _HARDCODED_SUPA_KEY);
 if(settingGet('supa_connected')&&settingGet('supa_url')&&settingGet('supa_anon_key')){
   supaUpdateHeaderPill();
   if(settingGet('supa_autosync')) supaLoadAll().catch(()=>{});

@@ -7058,12 +7058,16 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       const lower = text.toLowerCase();
 
       // ── WP error signals — check FIRST before any success path ──
-      // wp-comments-post.php never returns 200 on success (only on error/die)
-      const hasWpError = lower.includes('wp-die') || lower.includes('wordpress › error')
-                      || lower.includes('<title>error') || lower.includes('comment_post_id')
-                      || lower.includes('sorry, you must be') || lower.includes('error: ')
+      // Keep TIGHT — broad keywords like 'error:' appear on normal post pages (theme JS, post content).
+      // Only match patterns unique to WP's wp_die() / comment error output pages.
+      const hasWpError = lower.includes('wp-die')
+                      || lower.includes('wordpress › error')
+                      || lower.includes('<title>error</title>')
+                      || lower.includes('<title>wordpress error')
+                      || lower.includes('sorry, you must be logged in to post a comment')
+                      || lower.includes('you are posting comments too quickly')
                       || lower.includes('you are posting too quickly')
-                      || lower.includes('duplicate comment') && lower.includes('wp');
+                      || (lower.includes('duplicate comment') && lower.includes('wp-die'));
 
       // ── Moderation signals ──
       const hasModeration = lower.includes('your comment is awaiting')
@@ -7091,7 +7095,10 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
         // may contain those words in existing queued comments or plugin text, causing false positives.
         if(hasDuplicate) return { success:true, moderated:false, msg:'Duplicate comment — already exists on this post' };
         if(hasWpError){
-          const errMatch = text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
+          // Extract from WP's #error-page div first, fall back to first <p>
+          const errMatch = text.match(/id=[\"']error-page[\"'][^>]*>[\s\S]*?<p[^>]*>([\s\S]{10,300}?)<\/p>/i)
+                        || text.match(/class=[\"'][^\"']*wp-die[^\"']*[\"'][^>]*>[\s\S]*?<p[^>]*>([\s\S]{10,300}?)<\/p>/i)
+                        || text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
           const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g,'').trim() : 'WordPress returned an error';
           return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
         }
@@ -7111,7 +7118,9 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
         if(hasSuccessSignal && !hasWpError) return { success:true, moderated:false, msg:`Comment posted — success signals confirmed [${isVercelProxy?'vercel-proxy':proxyUrl.split('/')[2]||'proxy'}]` };
         // WP error — extract message and report failure
         if(hasWpError){
-          const errMatch = text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
+          const errMatch = text.match(/id=[\"']error-page[\"'][^>]*>[\s\S]*?<p[^>]*>([\s\S]{10,300}?)<\/p>/i)
+                        || text.match(/class=[\"'][^\"']*wp-die[^\"']*[\"'][^>]*>[\s\S]*?<p[^>]*>([\s\S]{10,300}?)<\/p>/i)
+                        || text.match(/<p[^>]*>([\s\S]{10,250}?)<\/p>/i);
           const errMsg = errMatch ? errMatch[1].replace(/<[^>]+>/g,'').trim() : 'WordPress rejected the comment';
           return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
         }

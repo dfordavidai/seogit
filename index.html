@@ -14644,7 +14644,7 @@ function renderSettings(el) {
         <div class="set-control">
           <input type="text" id="setting-supa_url" value="${esc(String(settingGet('supa_url')||''))}"
             placeholder="https://xxxxxxxxxxxx.supabase.co"
-            onchange="settingSet('supa_url',this.value)" style="width:320px;font-family:monospace">
+            oninput="settingSet('supa_url',this.value)" style="width:320px;font-family:monospace">
           <span class="set-hint">Project Settings → API → Project URL</span>
         </div>
       </div>
@@ -14653,7 +14653,7 @@ function renderSettings(el) {
         <div class="set-control">
           <input type="password" id="setting-supa_anon_key" value="${esc(String(settingGet('supa_anon_key')||''))}"
             placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-            onchange="settingSet('supa_anon_key',this.value)" style="width:320px;font-family:monospace">
+            oninput="settingSet('supa_anon_key',this.value)" style="width:320px;font-family:monospace">
           <button class="btn btn-ghost btn-xs" onclick="var i=document.getElementById('setting-supa_anon_key');i.type=i.type==='password'?'text':'password'">👁</button>
           <span class="set-hint">Project Settings → API → anon / public</span>
         </div>
@@ -14663,7 +14663,7 @@ function renderSettings(el) {
         <div class="set-control">
           <input type="password" id="setting-supa_service_key" value="${esc(String(settingGet('supa_service_key')||''))}"
             placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-            onchange="settingSet('supa_service_key',this.value)" style="width:320px;font-family:monospace">
+            oninput="settingSet('supa_service_key',this.value)" style="width:320px;font-family:monospace">
           <button class="btn btn-ghost btn-xs" onclick="var i=document.getElementById('setting-supa_service_key');i.type=i.type==='password'?'text':'password'">👁</button>
           <span class="set-hint">Project Settings → API → service_role (keep secret!)</span>
         </div>

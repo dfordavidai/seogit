@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>SEO PARASITE PRO v17 — Settings · Help · 33 Sources · Vercel + Supabase</title>
+<title>SEO PARASITE PRO v18 — Settings · Help · 33 Sources · Vercel + Supabase</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Tahoma:wght@400;700&display=swap" rel="stylesheet">
 <style>
 /* =============================================
@@ -6393,18 +6393,27 @@ function renderBlogCommenter(el){
       <!-- Add Single Site -->
       <div class="card">
         <div class="card-title">➕ Add Single Target</div>
-        <div class="fg"><label class="lbl">Blog / Post URL</label>
-          <input type="url" id="bc-url" placeholder="https://example.com/blog/post-title"/></div>
+        <div class="fg"><label class="lbl">Blog / Post URL <span class="tm" style="font-size:9px;font-weight:400">(platform auto-detected on paste)</span></label>
+          <input type="url" id="bc-url" placeholder="https://example.com/blog/post-title" oninput="bcAutoDetectType(this.value)"/></div>
         <div class="grid2">
           <div class="fg mb0"><label class="lbl">Label (optional)</label>
             <input type="text" id="bc-label" placeholder="e.g. Health Blog #1"/></div>
           <div class="fg mb0"><label class="lbl">Platform Type</label>
             <select id="bc-type">
-              <option value="wordpress">WordPress</option>
-              <option value="blogger">Blogger</option>
-              <option value="disqus">Disqus</option>
-              <option value="generic">Generic</option>
-              <option value="other">Other</option>
+              <option value="generic">⚙ Generic (Auto-detect)</option>
+              <option value="wordpress">🔵 WordPress</option>
+              <option value="blogger">🟠 Blogger / Blogspot</option>
+              <option value="medium">⚫ Medium</option>
+              <option value="tumblr">🌀 Tumblr</option>
+              <option value="disqus">💬 Disqus</option>
+              <option value="squarespace">⬛ Squarespace</option>
+              <option value="drupal">💧 Drupal</option>
+              <option value="joomla">🔶 Joomla</option>
+              <option value="forum">💬 Forum (phpBB/MyBB/XF)</option>
+              <option value="ghost">👻 Ghost</option>
+              <option value="wix">🟦 Wix</option>
+              <option value="typepad">📝 Typepad</option>
+              <option value="other">📝 Other</option>
             </select></div>
         </div>
         <div class="fg mt8"><label class="lbl">Notes</label>
@@ -7060,14 +7069,18 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       // ── WP error signals — check FIRST before any success path ──
       // Keep TIGHT — broad keywords like 'error:' appear on normal post pages (theme JS, post content).
       // Only match patterns unique to WP's wp_die() / comment error output pages.
-      const hasWpError = lower.includes('wp-die')
+      // Real wp_die() pages are tiny (< 6KB). A full post page is always much larger.
+      // Never flag hasWpError on a large page -- it's a successful redirect to the post.
+      const hasWpError = lower.length < 6000 && (
+                         lower.includes('wp-die')
                       || lower.includes('wordpress › error')
                       || lower.includes('<title>error</title>')
                       || lower.includes('<title>wordpress error')
                       || lower.includes('sorry, you must be logged in to post a comment')
                       || lower.includes('you are posting comments too quickly')
                       || lower.includes('you are posting too quickly')
-                      || (lower.includes('duplicate comment') && lower.includes('wp-die'));
+                      || (lower.includes('duplicate comment') && lower.includes('wp-die'))
+                      );
 
       // ── Moderation signals ──
       const hasModeration = lower.includes('your comment is awaiting')
@@ -7081,12 +7094,16 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       // ── Real success signals: page redirected back to the post with #comment-N ──
       // wp-comments-post.php on success does a 302 redirect to the post page
       // The proxy follows it and gives us the post page HTML or just a redirect signal
+      const commentNameLower = name.toLowerCase();
+      const commentTextSnippet = comment.slice(0, 40).toLowerCase();
       const hasSuccessSignal =
-        lower.includes('#comment-') ||                    // anchor to new comment
-        (lower.includes('comment-') && lower.includes('commentlist')) || // comment in list
+        lower.includes('#comment-') ||
+        (lower.includes('comment-') && lower.includes('commentlist')) ||
         lower.includes('comment posted successfully') ||
         lower.includes('thanks for commenting') ||
-        lower.includes('your comment has been');
+        lower.includes('your comment has been') ||
+        (commentNameLower.length > 2 && lower.includes(commentNameLower) && lower.includes('comment')) ||
+        (commentTextSnippet.length > 10 && lower.includes(commentTextSnippet));
 
       if(innerStatus === 302 || innerStatus === 301 || innerRedirected || resp.redirected){
         // Real redirect from wp-comments-post.php — definitive success
@@ -7363,9 +7380,391 @@ function bcManualAssist(site, name, email, website, comment){
 }
 
 // ── MAIN COMMENT ORCHESTRATOR v2 ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// NEW PLATFORM-SPECIFIC COMMENT ENGINES
+// ══════════════════════════════════════════════════════════════════
+
+// ── BLOGGER / BLOGSPOT ENGINE ─────────────────────────────────────
+async function bcBloggerComment(url, html, name, email, comment, logFn){
+  logFn(`   → Blogger engine: scanning for comment form...`,'info');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Extract blog ID and post ID from page
+  const blogIdM = html.match(/data-blogid=['""]?(\d+)['""]?/i) || html.match(/blogId['""]?\s*[:=]\s*['""]?(\d+)/i) || html.match(/var\s+blogId\s*=\s*(\d+)/i);
+  const postIdM  = html.match(/data-postid=['""]?(\d+)['""]?/i) || html.match(/postId['""]?\s*[:=]\s*['""]?(\d+)/i) || html.match(/var\s+postId\s*=\s*(\d+)/i);
+
+  const blogId = blogIdM ? blogIdM[1] : null;
+  const postId = postIdM ? postIdM[1] : null;
+
+  if(blogId && postId){
+    logFn(`   ✓ Blogger IDs: blog=${blogId} post=${postId}`,'success');
+    // Post to Blogger's comment endpoint
+    const commentEndpoint = `https://www.blogger.com/comment.g`;
+    const params = new URLSearchParams({
+      blogID: blogId,
+      postID: postId,
+      isPopup: 'false',
+      appMsg: '0',
+      commentBody: comment,
+      commentAuthor: name,
+      commentAuthorEmail: email,
+      commentAuthorUrl: '',
+    });
+
+    const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+    try {
+      const res = await fetch(`${_vBase}/api/proxy`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({url:commentEndpoint, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+      });
+      const data = await res.json();
+      if(data.status===200||data.status===302||data.status===301){
+        return {success:true, moderated:false, msg:'Blogger comment submitted via endpoint'};
+      }
+    } catch(e){}
+  }
+
+  // Fallback: find comment form in page (Blogger embeds comment form on post pages)
+  const form = doc.querySelector('form#comment-editor, form[action*="blogger.com/comment"], form[id*="comment"]');
+  if(form){
+    logFn(`   → Blogger fallback: form POST...`,'info');
+    return await bcGenericComment(url, html, name, email, '', comment, logFn);
+  }
+
+  logFn(`   ⚠ Blogger: comment form not found (may be embedded iframe)`,'warn');
+  return {success:false, moderated:false, msg:'Blogger: comment form embedded in iframe — cannot POST directly'};
+}
+
+// ── DISQUS ENGINE ─────────────────────────────────────────────────
+async function bcDisqusComment(url, html, name, email, comment, logFn){
+  logFn(`   → Disqus engine: extracting shortname & thread ID...`,'info');
+
+  // Extract shortname
+  const snM = html.match(/disqus_shortname\s*=\s*['"]([^'"]+)['"]/i) ||
+              html.match(/shortname['"]\s*:\s*['"]([^'"]+)['"]/i) ||
+              html.match(/data-disqus-shortname=['"']([^'"]+)['"']/i);
+  const shortname = snM ? snM[1] : null;
+  if(!shortname){
+    logFn(`   ⚠ Disqus shortname not found in page`,'warn');
+    return {success:false, moderated:false, msg:'Disqus shortname not found — cannot post via API'};
+  }
+  logFn(`   ✓ Disqus shortname: ${shortname}`,'success');
+
+  // Get thread identifier
+  const tidM = html.match(/disqus_identifier\s*=\s*['"]([^'"]+)['"]/i) ||
+               html.match(/identifier['"]\s*:\s*['"]([^'"]+)['"]/i);
+  const identifier = tidM ? tidM[1] : url;
+
+  // Disqus public API key (embedded in every Disqus embed)
+  const apiKeyM = html.match(/apiKey\s*[:=]\s*['"]([A-Za-z0-9_-]{16,})['"]/i) ||
+                  html.match(/publicKey\s*[:=]\s*['"]([A-Za-z0-9_-]{16,})['"]/i);
+  const apiKey = apiKeyM ? apiKeyM[1] : 'E8Uh5l5fHZ6gD8U3KycjAIAk46f68Zw7C6eW8WSjZvCLXebZ7p0r1yrYDpLPaS'; // Fallback public demo key
+
+  // First look up thread ID from identifier
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const threadLookup = `https://disqus.com/api/3.0/threads/list.json?api_key=${apiKey}&forum=${shortname}&thread=link:${encodeURIComponent(url)}&limit=1`;
+    const threadRes = await bcProxyFetch(threadLookup, {timeout:10000});
+    if(threadRes.ok){
+      const threadData = JSON.parse(threadRes.text);
+      const thread = threadData.response && threadData.response[0];
+      if(thread){
+        const threadId = thread.id;
+        logFn(`   ✓ Disqus thread ID: ${threadId}`,'success');
+        // Post guest comment
+        const postBody = new URLSearchParams({
+          api_key: apiKey,
+          thread: threadId,
+          message: comment,
+          author_name: name,
+          author_email: email,
+        });
+        const postRes = await fetch(`${_vBase}/api/proxy`, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({url:'https://disqus.com/api/3.0/posts/create.json', method:'POST', body:postBody.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+        });
+        const postData = await postRes.json();
+        const parsed = JSON.parse(postData.body||'{}');
+        if(parsed.code===0){
+          return {success:true, moderated:true, msg:`Disqus guest comment submitted (pending approval)`};
+        }
+        logFn(`   ⚠ Disqus API code: ${parsed.code} — ${parsed.response||'unknown error'}`,'warn');
+      }
+    }
+  } catch(e){ logFn(`   ⚠ Disqus API error: ${e.message}`,'warn'); }
+
+  return {success:false, moderated:false, msg:'Disqus: thread lookup failed — site may require login'};
+}
+
+// ── SQUARESPACE ENGINE ────────────────────────────────────────────
+async function bcSquarespaceComment(url, html, name, email, comment, logFn){
+  logFn(`   → Squarespace engine: posting to JSON comment API...`,'info');
+  const origin = new URL(url).origin;
+
+  // Extract post ID from page
+  const postIdM = html.match(/data-post-id=['""]?([a-f0-9]{24})['""]?/i) ||
+                  html.match(/"postId"\s*:\s*"([a-f0-9]{24})"/i) ||
+                  html.match(/\/api\/blog\/comment\/add.*?"([a-f0-9]{24})"/i);
+  const postId = postIdM ? postIdM[1] : null;
+
+  // Extract CSRF token (Squarespace uses crumb)
+  const crumbM = html.match(/crumb['"]\s*[:=]\s*['"]([^'"]+)['"]/i) ||
+                 html.match(/data-crumb=['""]([^'"]+)['""]?/i);
+  const crumb = crumbM ? crumbM[1] : '';
+
+  if(!postId){
+    logFn(`   ⚠ Squarespace: post ID not found — trying generic form`,'warn');
+    return await bcGenericComment(url, html, name, email, '', comment, logFn);
+  }
+
+  logFn(`   ✓ Squarespace post ID: ${postId}`,'success');
+
+  const payload = JSON.stringify({
+    postId,
+    name,
+    email,
+    body: comment,
+    authorUrl: '',
+  });
+
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const res = await fetch(`${_vBase}/api/proxy`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        url: `${origin}/api/blog/comment/add`,
+        method:'POST',
+        body: payload,
+        headers:{
+          'Content-Type':'application/json',
+          'Referer': url,
+          ...(crumb ? {'X-CSRF-Token': crumb} : {}),
+        }
+      })
+    });
+    const data = await res.json();
+    const body = JSON.parse(data.body||'{}');
+    if(data.status===200 && (body.id || body.status==='PENDING' || body.status==='APPROVED')){
+      return {success:true, moderated: body.status==='PENDING', msg:`Squarespace comment posted [${body.status||'submitted'}]`};
+    }
+    if(data.status===200 && !body.error){
+      return {success:true, moderated:true, msg:'Squarespace comment submitted'};
+    }
+    logFn(`   ⚠ Squarespace API response: ${data.status} — ${body.error||JSON.stringify(body).slice(0,100)}`,'warn');
+  } catch(e){ logFn(`   ⚠ Squarespace error: ${e.message}`,'warn'); }
+
+  return {success:false, moderated:false, msg:'Squarespace: comment API rejected — may require account'};
+}
+
+// ── DRUPAL ENGINE ─────────────────────────────────────────────────
+async function bcDrupalComment(url, html, name, email, comment, logFn){
+  logFn(`   → Drupal engine: detecting node/comment endpoints...`,'info');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Find node ID from URL pattern /node/NNN or data-nid
+  const nidM = url.match(/\/node\/(\d+)/i) ||
+               html.match(/data-nid=['""]?(\d+)['""]?/i) ||
+               html.match(/"nid"\s*:\s*"?(\d+)"?/i);
+  const nid = nidM ? nidM[1] : null;
+
+  // Look for Drupal form token (drupal_form_token or form_build_id)
+  const formTokenM = html.match(/name=['""]form_token['""][^>]*value=['""]([^'"]+)['"]/i);
+  const formBuildM  = html.match(/name=['""]form_build_id['""][^>]*value=['""]([^'"]+)['"]/i);
+  const formToken = formTokenM ? formTokenM[1] : '';
+  const formBuildId = formBuildM ? formBuildM[1] : '';
+  const formIdM = html.match(/name=['""]form_id['""][^>]*value=['""]([^'"]+comment[^'"]+)['"]/i);
+  const formId = formIdM ? formIdM[1] : 'comment_node_article_form';
+
+  // Find comment form action
+  const commentForm = doc.querySelector('form#comment-form, form[id*="comment"], form[action*="/comment"]');
+  const action = commentForm ? (commentForm.getAttribute('action')||'') : (nid ? `/comment/reply/${nid}` : '');
+  const origin = new URL(url).origin;
+  const postUrl = action.startsWith('http') ? action : (action ? origin+action : origin+`/comment/reply/${nid||1}`);
+
+  logFn(`   ✓ Drupal: node=${nid||'?'} posting to ${postUrl.replace(origin,'')}...`,'info');
+
+  const params = new URLSearchParams({
+    subject: `Re: ${comment.slice(0,40)}`,
+    'comment_body[und][0][value]': comment,
+    'comment_body[value]': comment,
+    name,
+    mail: email,
+    op: 'Save',
+    form_id: formId,
+    ...(formToken ? {form_token: formToken} : {}),
+    ...(formBuildId ? {form_build_id: formBuildId} : {}),
+  });
+
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const res = await fetch(`${_vBase}/api/proxy`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url:postUrl, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+    });
+    const data = await res.json();
+    if(data.status===302||data.status===301) return {success:true, moderated:false, msg:'Drupal comment posted (redirect)'};
+    if(data.status===200){
+      const lower=(data.body||'').toLowerCase();
+      if(lower.includes('your comment has been posted')||lower.includes('comment saved')||lower.includes(name.toLowerCase())){
+        return {success:true, moderated:false, msg:'Drupal comment posted'};
+      }
+      if(lower.includes('awaiting')||lower.includes('moderat')){
+        return {success:true, moderated:true, msg:'Drupal comment submitted — awaiting moderation'};
+      }
+    }
+  } catch(e){ logFn(`   ⚠ Drupal error: ${e.message}`,'warn'); }
+
+  logFn(`   ⚠ Drupal direct failed — trying generic form`,'warn');
+  return await bcGenericComment(url, html, name, email, '', comment, logFn);
+}
+
+// ── JOOMLA ENGINE ─────────────────────────────────────────────────
+async function bcJoomlaComment(url, html, name, email, comment, logFn){
+  logFn(`   → Joomla engine: scanning for comment component...`,'info');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const origin = new URL(url).origin;
+
+  // JComments (most common Joomla comment plugin)
+  const hasJComments = html.includes('jcomments') || html.includes('JComments');
+  const tokenM = html.match(/name=['""]([a-f0-9]{32})['""][^>]*value=['""]1['"]/i);
+  const token = tokenM ? tokenM[1] : null;
+  const objectIdM = html.match(/object_id['""\s]*[:=]\s*['""]?(\d+)/i)||html.match(/itemid['""\s]*[:=]\s*['""]?(\d+)/i);
+  const objectId = objectIdM ? objectIdM[1] : '1';
+
+  if(hasJComments){
+    logFn(`   ✓ JComments detected, objectId=${objectId}`,'success');
+    const params = new URLSearchParams({
+      option: 'com_jcomments',
+      task: 'addComment',
+      object_id: objectId,
+      object_group: 'com_content',
+      name,
+      email,
+      comment,
+      homepage: '',
+      ...(token ? {[tokenM[1]]:'1'} : {}),
+    });
+
+    const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+    try {
+      const res = await fetch(`${_vBase}/api/proxy`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({url:`${origin}/index.php`, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url,'X-Requested-With':'XMLHttpRequest'}})
+      });
+      const data = await res.json();
+      const parsed = JSON.parse(data.body||'{}');
+      if(parsed.result||parsed.status==='success'||data.status===200){
+        return {success:true, moderated:!!parsed.moderated, msg:'Joomla JComments: comment posted'};
+      }
+    } catch(e){ logFn(`   ⚠ JComments error: ${e.message}`,'warn'); }
+  }
+
+  // Fallback: generic form scraping
+  logFn(`   → Joomla fallback: generic form POST...`,'info');
+  return await bcGenericComment(url, html, name, email, '', comment, logFn);
+}
+
+// ── FORUM ENGINE (phpBB / MyBB / XenForo / vBulletin) ─────────────
+async function bcForumComment(url, html, name, email, comment, logFn){
+  logFn(`   → Forum engine: detecting software fingerprint...`,'info');
+  const lower = html.toLowerCase();
+  const origin = new URL(url).origin;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Detect forum type
+  let forumType = 'generic';
+  if(lower.includes('phpbb')) forumType='phpbb';
+  else if(lower.includes('mybb')||lower.includes('my_post_key')) forumType='mybb';
+  else if(lower.includes('xenforo')||lower.includes('xf-')) forumType='xenforo';
+  else if(lower.includes('vbulletin')||lower.includes('vb_')) forumType='vbulletin';
+  else if(lower.includes('smfproject')||lower.includes('smf_')) forumType='smf';
+
+  logFn(`   ✓ Forum type: ${forumType}`,'success');
+
+  // Find quick-reply / post form
+  const form = doc.querySelector('form#quick-reply-form, form#quick_reply, form[id*="qreply"], form[id*="reply"], form[action*="reply"], form[action*="post"]') ||
+               doc.querySelector('form');
+  if(!form){ return await bcGenericComment(url, html, name, email, '', comment, logFn); }
+
+  const action = form.getAttribute('action')||'';
+  const postUrl = action.startsWith('http') ? action : (action ? (action.startsWith('/')?origin+action:origin+'/'+action) : url);
+
+  const params = new URLSearchParams();
+  // Capture all hidden fields (session tokens, thread IDs)
+  form.querySelectorAll('input[type="hidden"]').forEach(inp=>{ if(inp.name) params.set(inp.name, inp.value||''); });
+
+  // Map message field
+  form.querySelectorAll('textarea, input').forEach(inp=>{
+    const n=(inp.getAttribute('name')||'').toLowerCase();
+    const id=(inp.getAttribute('id')||'').toLowerCase();
+    if(inp.type==='hidden'||inp.type==='submit') return;
+    if(n.includes('message')||n.includes('body')||n.includes('post')||id.includes('message')||inp.tagName==='TEXTAREA'){
+      params.set(inp.getAttribute('name'), comment);
+    }
+  });
+  // Submit button
+  const subBtn = form.querySelector('input[type="submit"],button[type="submit"]');
+  if(subBtn&&subBtn.name) params.set(subBtn.name, subBtn.value||'Post');
+
+  logFn(`   → Forum POST to: ${postUrl.replace(origin,'')}...`,'info');
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const res = await fetch(`${_vBase}/api/proxy`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url:postUrl, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+    });
+    const data = await res.json();
+    if(data.status===302||data.status===301) return {success:true, moderated:false, msg:`${forumType} post submitted (redirect)`};
+    if(data.status===200){
+      const respLower=(data.body||'').toLowerCase();
+      if(respLower.includes('thank')||respLower.includes('posted')||respLower.includes(name.toLowerCase())||respLower.includes('reply')){
+        return {success:true, moderated:false, msg:`${forumType} post submitted`};
+      }
+      if(respLower.includes('moderat')||respLower.includes('approved')){
+        return {success:true, moderated:true, msg:`${forumType} post pending moderation`};
+      }
+    }
+  } catch(e){ logFn(`   ⚠ Forum POST error: ${e.message}`,'warn'); }
+
+  return {success:false, moderated:false, msg:`${forumType}: post failed — may require account/login`};
+}
+
 async function bcCommentOnSite(site, name, email, website, comment, logFn){
   const url = site.url;
   const siteType = (site.type||'generic').toLowerCase();
+
+  // ── STEP 0: Platform-specific fast-path engines ──
+  // If the URL was pre-detected as a specific platform, route immediately
+  // after fetching the page (needed for HTML fingerprinting / token extraction).
+  // Only skip WP detection for non-WP platforms.
+  const platformFastPaths = new Set(['blogger','disqus','squarespace','drupal','joomla','forum']);
+  if(platformFastPaths.has(siteType)){
+    logFn(`   → Platform detected: ${siteType.toUpperCase()} — using dedicated engine`,'accent');
+    // Still fetch page for token extraction
+    logFn(`   → Fetching page HTML...`,'info');
+    let html2='';
+    const pr2 = await bcProxyFetch(url, {timeout:18000});
+    if(pr2.ok && pr2.text.length>100){
+      html2 = pr2.text;
+      logFn(`   ✓ Page fetched (${(html2.length/1024).toFixed(1)} KB)`,'success');
+    }
+    if(siteType==='blogger')    return await bcBloggerComment(url, html2, name, email, comment, logFn);
+    if(siteType==='disqus')     return await bcDisqusComment(url, html2, name, email, comment, logFn);
+    if(siteType==='squarespace')return await bcSquarespaceComment(url, html2, name, email, comment, logFn);
+    if(siteType==='drupal')     return await bcDrupalComment(url, html2, name, email, comment, logFn);
+    if(siteType==='joomla')     return await bcJoomlaComment(url, html2, name, email, comment, logFn);
+    if(siteType==='forum')      return await bcForumComment(url, html2, name, email, comment, logFn);
+  }
 
   // ── STEP 1: Detect WordPress via REST API discovery ──
   logFn(`   → Probing site type and REST API...`,'info');
@@ -7403,6 +7802,41 @@ async function bcCommentOnSite(site, name, email, website, comment, logFn){
     if(!isWordPress && (html.includes('wp-content')||html.includes('wp-includes')||html.includes('/wp-json/'))){
       isWordPress = true;
       logFn(`   ✓ WordPress confirmed from page content`,'success');
+    }
+
+    // ── HTML fingerprint: route to specialized engines even for 'generic' type ──
+    if(!isWordPress){
+      const hLower = html.toLowerCase();
+      // Blogger
+      if((hLower.includes('blogger.com')||hLower.includes('blogspot.com'))&&(hLower.includes('data-blogid')||hLower.includes('blogid'))){
+        logFn(`   ✓ Blogger fingerprint detected — using Blogger engine`,'success');
+        return await bcBloggerComment(url, html, name, email, comment, logFn);
+      }
+      // Disqus
+      if(hLower.includes('disqus_shortname')||hLower.includes('disqus.com/embed')){
+        logFn(`   ✓ Disqus fingerprint detected — using Disqus engine`,'success');
+        return await bcDisqusComment(url, html, name, email, comment, logFn);
+      }
+      // Squarespace
+      if(hLower.includes('static.squarespace.com')||hLower.includes('squarespace-cdn')){
+        logFn(`   ✓ Squarespace fingerprint detected — using Squarespace engine`,'success');
+        return await bcSquarespaceComment(url, html, name, email, comment, logFn);
+      }
+      // Drupal
+      if(hLower.includes('drupal.settings')||hLower.includes('sites/default/files')||hLower.includes('drupal.js')){
+        logFn(`   ✓ Drupal fingerprint detected — using Drupal engine`,'success');
+        return await bcDrupalComment(url, html, name, email, comment, logFn);
+      }
+      // Joomla
+      if(hLower.includes('joomla')||hLower.includes('com_content')){
+        logFn(`   ✓ Joomla fingerprint detected — using Joomla engine`,'success');
+        return await bcJoomlaComment(url, html, name, email, comment, logFn);
+      }
+      // Forums
+      if(hLower.includes('phpbb')||hLower.includes('my_post_key')||hLower.includes('xf-')||hLower.includes('vbulletin')){
+        logFn(`   ✓ Forum software fingerprint detected — using Forum engine`,'success');
+        return await bcForumComment(url, html, name, email, comment, logFn);
+      }
     }
   } else {
     logFn(`   ⚠ Page fetch failed (${pageResult.status||pageResult.error||'network error'})`,'warn');
@@ -7501,7 +7935,7 @@ async function bcStartRun(){
   bcTermLog(`🚀 Starting Auto Commenter — ${pending.length} sites queued`,'accent');
   bcTermLog(`👤 Identity: ${esc(name)} | ${esc(email)} | ${esc(website||'no website')}`,'info');
   bcTermLog(`💬 Base comment: "${esc(baseComment.slice(0,80))}${baseComment.length>80?'...':''}"`, 'info');
-  bcTermLog(`⚙ Engine: WP REST API → Legacy form POST → Generic POST → Manual Assist (8 proxies)`, 'accent');
+  bcTermLog(`⚙ Engine: WP REST → Legacy POST → Blogger → Disqus → Squarespace → Drupal → Joomla → Forum → Generic (8 proxies)`, 'accent');
   bcTermSeparator('');
 
   let done=0, success=0, failed=0;
@@ -7523,7 +7957,7 @@ async function bcStartRun(){
     if(pl) pl.textContent=`Site ${i+1}/${total} — ${pct}%`;
 
     bcTermSeparator(`SITE ${i+1}/${total}`);
-    bcTermLog(`🌐 ${esc(site.url)}`,'accent');
+    bcTermLog(`🌐 ${esc(site.url)} · <span style="color:var(--term-accent)">${bcPlatformLabel(site.type||'generic')}</span>`,'accent');
 
     let result={url:site.url, label:site.label||site.url, status:'failed', reason:'', comment:siteComment};
 
@@ -7531,49 +7965,86 @@ async function bcStartRun(){
       const postResult = await bcCommentOnSite(site, siteName, siteEmail, siteWebsite, siteComment, (msg,type)=>bcTermLog(msg,type));
 
       if(postResult.success && !postResult.moderated){
-        bcTermLog(`   ✅ COMMENT POSTED — LIVE ✅`,'success');
+        bcTermLog(`   ✅ COMMENT POSTED — verifying live presence...`,'success');
         bcTermLog(`   → ${esc(postResult.msg)}`,'muted');
         bcTermLog(`   💬 Comment: "${esc(siteComment.slice(0,90))}${siteComment.length>90?'...':''}"`, 'accent');
         bcTermLog(`   👤 Identity: ${esc(siteName)} &lt;${esc(siteEmail)}&gt;${siteWebsite?' | '+esc(siteWebsite):''}`, 'muted');
-        // Show clickable link in terminal
+        // ── Live verification: scan all comment pages ──
+        await bcWait(1800);
+        const vr = await bcVerifyCommentLive(site.url, siteName, siteComment, (msg,type)=>bcTermLog(msg,type));
+        const verifiedUrl = vr.found ? vr.url : site.url;
+        site.verifiedUrl = verifiedUrl;
         const term = document.getElementById('bc-terminal');
         if(term){
           const linkDiv = document.createElement('div');
           linkDiv.className = 'tline';
-          linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 Verify: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          if(vr.found){
+            linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 CONFIRMED page ${vr.page}: </span><a href="${esc(verifiedUrl)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(verifiedUrl)}</a>`;
+          } else {
+            linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Verify manually: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          }
           term.appendChild(linkDiv);
           term.scrollTop = term.scrollHeight;
         }
-        result.status='success'; result.reason=postResult.msg;
+        result.status='success';
+        result.verified = vr.found;
+        result.verifiedPage = vr.page;
+        result.verifiedUrl = verifiedUrl;
+        result.reason = vr.found ? `Live on page ${vr.page}` : postResult.msg;
         site.done=true; site.queued=siteComment; bcSave();
         success++;
+
       } else if(postResult.success && postResult.moderated){
-        bcTermLog(`   ⏳ COMMENT SUBMITTED — AWAITING MODERATION`,'success');
+        bcTermLog(`   ⏳ COMMENT SUBMITTED — scanning for early approval...`,'success');
         bcTermLog(`   → ${esc(postResult.msg)}`,'muted');
         bcTermLog(`   💬 Comment: "${esc(siteComment.slice(0,90))}${siteComment.length>90?'...':''}"`, 'accent');
         bcTermLog(`   👤 Identity: ${esc(siteName)} &lt;${esc(siteEmail)}&gt;${siteWebsite?' | '+esc(siteWebsite):''}`, 'muted');
+        // Even "moderated" posts may already be live — some blogs auto-approve
+        await bcWait(2500);
+        const vm = await bcVerifyCommentLive(site.url, siteName, siteComment, (msg,type)=>bcTermLog(msg,type));
         const termM = document.getElementById('bc-terminal');
         if(termM){
           const linkDivM = document.createElement('div');
           linkDivM.className = 'tline';
-          linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Check later: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          if(vm.found){
+            linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🎉 AUTO-APPROVED — LIVE page ${vm.page}: </span><a href="${esc(vm.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(vm.url)}</a>`;
+          } else {
+            linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Check later: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          }
           termM.appendChild(linkDivM);
           termM.scrollTop = termM.scrollHeight;
         }
-        result.status='moderated'; result.reason=postResult.msg;
+        result.status   = vm.found ? 'success' : 'moderated';
+        result.verified = vm.found;
+        result.verifiedPage = vm.page;
+        result.verifiedUrl  = vm.found ? vm.url : site.url;
+        result.reason = vm.found ? `Auto-approved — live page ${vm.page}` : postResult.msg;
+        site.verifiedUrl = result.verifiedUrl;
         site.done=true; site.queued=siteComment; bcSave();
         success++;
+
       } else {
+        // Failed post — still do a quick scan: some servers return error codes but post anyway
         bcTermLog(`   ✗ Failed: ${esc(postResult.msg)}`,'error');
-        result.status='failed'; result.reason=postResult.msg;
-        failed++;
-        // Offer manual assist if enabled and we couldn't auto-post
-        if(manualFallback){
-          bcTermLog(`   → Opening Manual Assist for this site...`,'warn');
-          await new Promise(r=>setTimeout(r,800));
-          bcManualAssist(site, siteName, siteEmail, siteWebsite, siteComment);
-          // Wait for user to potentially dismiss the modal
-          await bcWait(3000);
+        bcTermLog(`   🔍 Quick-scanning in case comment posted silently...`,'muted');
+        await bcWait(1200);
+        const vf = await bcVerifyCommentLive(site.url, siteName, siteComment, ()=>{});
+        if(vf.found){
+          bcTermLog(`   🎉 Silent post confirmed on page ${vf.page} — marking SUCCESS!`,'success');
+          const termF = document.getElementById('bc-terminal');
+          if(termF){ const lf=document.createElement('div'); lf.className='tline'; lf.innerHTML=`<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 CONFIRMED: </span><a href="${esc(vf.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(vf.url)}</a>`; termF.appendChild(lf); termF.scrollTop=termF.scrollHeight; }
+          result.status='success'; result.verified=true; result.verifiedPage=vf.page; result.verifiedUrl=vf.url; result.reason=`Silent post — confirmed page ${vf.page}`;
+          site.done=true; site.verifiedUrl=vf.url; site.queued=siteComment; bcSave();
+          success++;
+        } else {
+          result.status='failed'; result.reason=postResult.msg;
+          failed++;
+          if(manualFallback){
+            bcTermLog(`   → Opening Manual Assist for this site...`,'warn');
+            await new Promise(r=>setTimeout(r,800));
+            bcManualAssist(site, siteName, siteEmail, siteWebsite, siteComment);
+            await bcWait(3000);
+          }
         }
       }
     } catch(err){
@@ -7636,12 +8107,13 @@ function bcShowResultsSummary(){
       <div style="font-family:var(--mono);font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;font-weight:700">✅ SUCCESSFUL COMMENTS (${successList.length})</div>
       ${successList.map(r=>`
       <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(0,87,255,0.04);border:1px solid rgba(0,87,255,0.15);border-radius:7px;margin-bottom:5px">
-        <span style="font-size:14px">${r.status==='moderated'?'⏳':'✅'}</span>
+        <span style="font-size:14px">${r.status==='moderated'?'⏳': r.verified?'✅':'🟡'}</span>
         <div style="flex:1;min-width:0">
           <div style="font-family:var(--mono);font-size:11px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.label)}</div>
           <div style="font-family:var(--mono);font-size:9px;color:var(--muted2)">${esc(r.url)}</div>
+          ${r.verified && r.verifiedPage ? `<div style="font-family:var(--mono);font-size:9px;color:#3fb950;margin-top:2px">✓ Confirmed live on comment page ${r.verifiedPage}${r.verifiedUrl&&r.verifiedUrl!==r.url?' — <a href="'+esc(r.verifiedUrl)+'" target="_blank" style="color:#58a6ff">view page</a>':''}</div>` : ''}
         </div>
-        <span class="badge ${r.status==='moderated'?'badge-y':'badge-g'}">${r.status==='moderated'?'Pending Moderation':'Posted'}</span>
+        <span class="badge ${r.status==='moderated'?'badge-y': r.verified?'badge-g':'badge-y'}">${r.status==='moderated'?'Pending Moderation': r.verified?'Confirmed Live':'Posted (unverified)'}</span>
         <span style="font-family:var(--mono);font-size:9px;color:var(--muted2)">${esc(r.reason)}</span>
       </div>`).join('')}
     </div>`:''}
@@ -8091,6 +8563,150 @@ function bcStopRun(){
 
 function bcWait(ms){ return new Promise(res=>setTimeout(res,ms)); }
 
+// ══════════════════════════════════════════════════════════════════════════
+// COMMENT LIVE VERIFIER — Multi-page scanner
+// After posting, scans paginated comment pages to confirm the comment is live.
+// Handles: WordPress ?cpage=N, Blogger showComment, generic ?page=N,
+//          last-page-first strategy, comment count estimation, anchor detection.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function bcVerifyCommentLive(pageUrl, commenterName, commentText, logFn){
+  logFn = logFn || (()=>{});
+  const MAX_PAGES = 10;   // max paginated comment pages to scan
+  const FETCH_TO  = 12000; // timeout per page fetch ms
+
+  // ── Build a fingerprint: normalised first 22 chars of name + first 18 of comment
+  const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim();
+  const nameFP  = norm(commenterName).slice(0,22);
+  const bodyFP  = norm(commentText).slice(0,18);
+
+  // ── Try to match either fingerprint anywhere in raw HTML
+  function pageContainsComment(html){
+    const h = norm(html);
+    const nameHit = nameFP.length > 2 && h.includes(nameFP);
+    const bodyHit = bodyFP.length > 4 && h.includes(bodyFP);
+    return nameHit || bodyHit;
+  }
+
+  // ── Extract total comment count from page HTML (best-effort)
+  function extractCommentCount(html){
+    // WordPress: <span id="comments">5000</span> or "5,000 Comments" or "5000 comments"
+    const m1 = html.match(/<span[^>]*id=[\"']comments[\"'][^>]*>([\d,]+)<\/span>/i);
+    if(m1) return parseInt(m1[1].replace(/,/g,''))||0;
+    // "NNNN Comments" or "NNNN Responses" or "NNNN Replies"
+    const m2 = html.match(/([\d,]+)\s*(?:comments?|responses?|replies?)/i);
+    if(m2) return parseInt(m2[1].replace(/,/g,''))||0;
+    // data-comment-count
+    const m3 = html.match(/data-comment-count=[\"']([\d]+)[\"']/i);
+    if(m3) return parseInt(m3[1])||0;
+    return 0;
+  }
+
+  // ── Extract comments per page setting from WP pagination HTML
+  function extractCommentsPerPage(html){
+    // WordPress pagination: "Page 1 of 25" — deduce from that + total
+    const m = html.match(/Page\s+\d+\s+of\s+(\d+)/i);
+    if(m) return null; // we get total pages directly
+    // data-per-page or per_page
+    const m2 = html.match(/per[_-]page[\"'\s]*[:=][\"'\s]*([\d]+)/i);
+    if(m2) return parseInt(m2[1])||50;
+    return 50; // WP default
+  }
+
+  // ── Detect total comment pages from WP navigation HTML
+  function extractTotalCommentPages(html){
+    // WP: <span class="page-numbers current">3</span> and siblings, or "Page N of M"
+    const m1 = html.match(/Page\s+\d+\s+of\s+(\d+)/i);
+    if(m1) return parseInt(m1[1])||1;
+    // page-numbers buttons: grab the highest number
+    const pageNums = [...html.matchAll(/class=[\"'][^\"']*page-numbers[^\"']*[\"'][^>]*>(\d+)</gi)]
+      .map(x=>parseInt(x[1])).filter(n=>!isNaN(n)&&n>0);
+    if(pageNums.length) return Math.max(...pageNums);
+    // Blogger / generic: look for ?cpage=N or ?page=N in pagination links
+    const cpages = [...html.matchAll(/[?&]cpage=(\d+)/gi)].map(x=>parseInt(x[1]));
+    if(cpages.length) return Math.max(...cpages);
+    const pages  = [...html.matchAll(/[?&](?:page|pg|paged)=(\d+)/gi)].map(x=>parseInt(x[1]));
+    if(pages.length) return Math.max(...pages);
+    return 1;
+  }
+
+  // ── Build candidate page URLs for a given platform & page number
+  function buildCommentPageUrls(baseUrl, pageNum){
+    const u = new URL(baseUrl);
+    const origin = u.origin;
+    const path   = u.pathname.replace(/\/$/,'');
+    const candidates = [];
+    // WordPress cpage
+    const wpBase = `${origin}${path}/`;
+    candidates.push(`${wpBase}?cpage=${pageNum}`);
+    // WP with existing query params
+    const q = new URLSearchParams(u.search);
+    q.set('cpage', pageNum);
+    candidates.push(`${u.origin}${u.pathname}?${q.toString()}`);
+    // Generic page param
+    candidates.push(`${origin}${path}/?page=${pageNum}`);
+    candidates.push(`${origin}${path}?page=${pageNum}`);
+    // Blogger
+    candidates.push(`${baseUrl}${baseUrl.includes('?')?'&':'?'}page=${pageNum}`);
+    // Ghost / others
+    candidates.push(`${origin}${path}?comments_page=${pageNum}`);
+    // Deduplicate
+    return [...new Set(candidates)];
+  }
+
+  // ══ PHASE 1: Check page 1 (already fetched by caller, but re-check via fresh fetch) ══
+  logFn(`   🔍 Verifier: scanning page 1 for comment...`,'info');
+  try {
+    const r1 = await bcProxyFetch(pageUrl, {timeout: FETCH_TO});
+    if(r1.ok && r1.text){
+      if(pageContainsComment(r1.text)){
+        logFn(`   ✅ Verifier: comment CONFIRMED on page 1`,'success');
+        return {found:true, page:1, url:pageUrl};
+      }
+      // Extract total pages / count so we know how far to scan
+      const totalPages = Math.min(extractTotalCommentPages(r1.text), MAX_PAGES);
+      const commentCount = extractCommentCount(r1.text);
+      if(commentCount > 0) logFn(`   🔍 Verifier: ${commentCount.toLocaleString()} total comments detected — scanning pages...`,'info');
+      if(totalPages > 1) logFn(`   🔍 Verifier: ${totalPages} comment pages found — scanning last→first...`,'info');
+
+      // ══ PHASE 2: Scan from LAST page backwards (newest comments land on last page) ══
+      const scanOrder = [];
+      for(let p = totalPages; p >= 2; p--) scanOrder.push(p);
+      // If no pagination detected but comment count is high, try pages 2–MAX_PAGES anyway
+      if(scanOrder.length === 0 && commentCount > 30){
+        for(let p = MAX_PAGES; p >= 2; p--) scanOrder.push(p);
+      }
+
+      for(const pageNum of scanOrder){
+        if(_bcStop) break;
+        const candidates = buildCommentPageUrls(pageUrl, pageNum);
+        let scanned = false;
+        for(const cUrl of candidates){
+          if(scanned) break;
+          try {
+            logFn(`   🔍 Verifier: checking comment page ${pageNum} → ${cUrl}`,'muted');
+            const rp = await bcProxyFetch(cUrl, {timeout: FETCH_TO});
+            if(rp.ok && rp.text && rp.text.length > 500){
+              scanned = true;
+              if(pageContainsComment(rp.text)){
+                logFn(`   ✅ Verifier: comment CONFIRMED on page ${pageNum}!`,'success');
+                return {found:true, page:pageNum, url:cUrl};
+              }
+            }
+          } catch(e){}
+        }
+        // Small yield to avoid blocking UI
+        await bcWait(250);
+      }
+    }
+  } catch(e){
+    logFn(`   ⚠ Verifier fetch error: ${e.message}`,'warn');
+  }
+
+  logFn(`   ⚠ Verifier: comment not found in visible pages (may be in moderation)`,'warn');
+  return {found:false, page:null, url:null};
+}
+
 // Queue comment to ALL pending sites at once
 function bcQueueAll(){
   const out=document.getElementById('bc-gen-out');
@@ -8106,6 +8722,7 @@ function bcQueueAll(){
 
 function bcRenderSiteList(){
   if(!_bcSites.length) return '<p class="tm mono xs">No sites added yet. Add a blog URL above.</p>';
+  const typeOptions = ['generic','wordpress','blogger','medium','tumblr','disqus','squarespace','drupal','joomla','forum','ghost','wix','typepad','other'];
   return _bcSites.map((s,i)=>`
     <div id="bc-site-${s.id}" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:7px;background:var(--bg)">
       <div class="flex aic g8" style="margin-bottom:6px">
@@ -8113,8 +8730,10 @@ function bcRenderSiteList(){
         <span class="mono xs ta" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           <a href="${esc(s.url)}" target="_blank" rel="noreferrer" style="color:var(--accent);text-decoration:none">${esc(s.label||s.url)}</a>
         </span>
-        <span class="badge badge-b">${esc(s.type)}</span>
-        <button class="btn btn-ghost btn-xs" onclick="bcOpenSite('${s.id}')">🌐 Open</button>
+        <select class="btn btn-xs" style="padding:1px 3px;font-size:9px;font-family:var(--mono);cursor:pointer" onchange="bcChangeSiteType('${s.id}',this.value)" title="Change platform type">
+          ${typeOptions.map(t=>`<option value="${t}" ${s.type===t?'selected':''}>${bcPlatformLabel(t)}</option>`).join('')}
+        </select>
+        <button class="btn btn-ghost btn-xs" onclick="bcOpenSite('${s.id}')">🌐</button>
         <button class="btn btn-danger btn-xs" onclick="bcRemoveSite('${s.id}')">✕</button>
       </div>
       <div class="mono xs tm" style="margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.url)}</div>
@@ -8144,7 +8763,25 @@ function bcRenderLog(){
 }
 
 function bcTypeIcon(t){
-  return {wordpress:'🔵',blogger:'🟠',disqus:'💬',generic:'🌐',other:'📝'}[t]||'📝';
+  return {
+    wordpress:'🔵', blogger:'🟠', disqus:'💬', squarespace:'⬛',
+    drupal:'💧', joomla:'🔶', forum:'💬', ghost:'👻',
+    wix:'🟦', typepad:'📝', tumblr:'🌀', medium:'Ⓜ',
+    generic:'⚙', other:'📝'
+  }[t]||'📝';
+}
+
+function bcAutoDetectType(url){
+  if(!url||!url.startsWith('http')) return;
+  const detected = bcDetectPlatformFromUrl(url);
+  const sel = document.getElementById('bc-type');
+  if(!sel) return;
+  if(detected !== 'generic'){
+    sel.value = detected;
+    // Flash the select to show auto-detect fired
+    sel.style.background='#d0ffd0';
+    setTimeout(()=>{ sel.style.background=''; }, 1200);
+  }
 }
 
 function bcManualAssistSite(siteId){
@@ -8179,11 +8816,12 @@ function bcAddSite(){
   const url=(urlEl||{value:''}).value.trim();
   if(!url){ alert('Enter a URL first.'); return; }
   if(!/^https?:\/\//i.test(url)){ alert('URL must start with http:// or https://'); return; }
+  const selectedType = (document.getElementById('bc-type')||{value:'generic'}).value;
   const site={
     id:uid(),
     url,
     label:(document.getElementById('bc-label')||{value:''}).value.trim()||url,
-    type:(document.getElementById('bc-type')||{value:'wordpress'}).value,
+    type: selectedType === 'generic' ? bcDetectPlatformFromUrl(url) : selectedType,
     name:(document.getElementById('bc-gen-name')||{value:''}).value.trim(),
     email:(document.getElementById('bc-email')||{value:''}).value.trim(),
     website:(document.getElementById('bc-website')||{value:''}).value.trim(),
@@ -8194,7 +8832,7 @@ function bcAddSite(){
   _bcSites.push(site);
   bcSave();
   bcLog(`Added site: ${site.label}`, 'info');
-  bcTermLog(`➕ Added: ${esc(site.url)}`,'info');
+  bcTermLog(`➕ Added: ${esc(site.url)} · ${bcPlatformLabel(site.type)}`,'info');
   // clear url+label+notes only
   ['bc-url','bc-label','bc-notes'].forEach(id=>{
     const e=document.getElementById(id); if(e) e.value='';
@@ -8224,6 +8862,11 @@ function bcMarkDone(id){
 function bcOpenSite(id){
   const s=_bcSites.find(x=>x.id===id);
   if(s) window.open(s.url,'_blank','noreferrer');
+}
+
+function bcChangeSiteType(id, newType){
+  const s=_bcSites.find(x=>x.id===id);
+  if(s){ s.type=newType; bcSave(); bcRefresh(); }
 }
 
 function bcGenerate(){
@@ -8350,17 +8993,115 @@ function bcMarkDoneAndClose(siteId){
   document.getElementById('bc-modal')&&document.getElementById('bc-modal').remove();
 }
 
+// ── URL PLATFORM PRE-DETECTOR ─────────────────────────────────────
+function bcDetectPlatformFromUrl(url){
+  try {
+    const u = url.toLowerCase();
+    const h = new URL(url).hostname.toLowerCase();
+    if(/blogspot\.com|blogger\.com/.test(h)) return 'blogger';
+    if(/ghost\.io/.test(h)||/\/ghost\//.test(u)) return 'ghost';
+    if(/squarespace\.com/.test(h)||/static\.squarespace/.test(u)) return 'squarespace';
+    if(/wixsite\.com|wix\.com/.test(h)) return 'wix';
+    if(/typepad\.com/.test(h)) return 'typepad';
+    if(/tumblr\.com/.test(h)) return 'tumblr';
+    if(/medium\.com/.test(h)) return 'medium';
+    if(/disqus\.com/.test(h)) return 'disqus';
+    if(/phpbb|mybb|vbulletin|xenforo|smfproject|simplemachines/.test(u)) return 'forum';
+    if(/joomla/.test(u)||/index\.php\?option=com_content/.test(u)) return 'joomla';
+    if(/drupal/.test(u)||/sites\/default\/files/.test(u)) return 'drupal';
+    if(/wordpress\.com/.test(h)) return 'wordpress';
+    // Self-hosted WordPress: detect from URL path signals
+    if(/\/wp-content\/|\/wp-includes\/|\/wp-json\/|[?&]p=\d+|\/\?page_id=\d+|\/wp-login\.php/.test(u)) return 'wordpress';
+  } catch(e){}
+  return 'generic';
+}
+
+function bcPlatformLabel(type){
+  const map={wordpress:'🔵 WordPress',blogger:'🟠 Blogger',squarespace:'⬛ Squarespace',disqus:'💬 Disqus',drupal:'💧 Drupal',joomla:'🔶 Joomla',ghost:'👻 Ghost',forum:'💬 Forum',medium:'⚫ Medium',wix:'🟦 Wix',typepad:'📝 Typepad',tumblr:'🌀 Tumblr',generic:'⚙ Generic',other:'📝 Other'};
+  return map[type]||'⚙ Generic';
+}
+
 function bcImportBulk(){
-  const raw=prompt('Paste URLs — one per line:');
-  if(!raw) return;
-  const urls=raw.split('\n').map(u=>u.trim()).filter(u=>/^https?:\/\//i.test(u));
-  if(!urls.length){ alert('No valid URLs found.'); return; }
-  urls.forEach(url=>{
-    _bcSites.push({id:uid(),url,label:url,type:'generic',name:'',email:'',website:'',notes:'',done:false,queued:''});
+  // Build modal overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = e=>{ if(e.target===overlay) overlay.remove(); };
+
+  const box = document.createElement('div');
+  box.style.cssText='background:var(--win-surface);border:2px solid;border-color:var(--win-btn-hi) var(--win-btn-sh) var(--win-btn-sh) var(--win-btn-hi);width:560px;max-width:95vw;font-family:Tahoma,Arial,sans-serif;font-size:11px;';
+
+  box.innerHTML=`
+    <div style="background:var(--win-blue);color:#fff;padding:4px 10px;font-family:'Share Tech Mono',monospace;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:space-between">
+      <span>📋 Paste Bulk URLs — Auto-Detect Platform</span>
+      <span style="cursor:pointer;font-size:14px;line-height:1" id="bc-bulk-close">✕</span>
+    </div>
+    <div style="padding:12px">
+      <div style="margin-bottom:6px;color:var(--win-text-muted);font-size:10px;font-family:'Share Tech Mono',monospace">
+        Paste one URL per line. Platform is auto-detected from hostname (blogspot → Blogger, etc.)
+      </div>
+      <textarea id="bc-bulk-ta" placeholder="https://example.blogspot.com/2024/01/post.html&#10;https://site.squarespace.com/blog/article&#10;https://myblog.com/post-123&#10;..." style="width:100%;height:160px;font-family:'Share Tech Mono',monospace;font-size:10px;resize:vertical;border:2px solid;border-color:var(--win-btn-sh) var(--win-btn-hi) var(--win-btn-hi) var(--win-btn-sh);padding:4px;background:#fff"></textarea>
+      <div id="bc-bulk-preview" style="margin-top:8px;background:#fff;border:1px solid #ccc;padding:6px;max-height:160px;overflow-y:auto;font-family:'Share Tech Mono',monospace;font-size:10px;display:none"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+        <button class="btn btn-primary" id="bc-bulk-add">✔ Add to Queue</button>
+        <button class="btn" id="bc-bulk-preview-btn">🔍 Preview</button>
+        <button class="btn" id="bc-bulk-close2">Cancel</button>
+        <span id="bc-bulk-count" style="margin-left:auto;font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--win-text-muted)"></span>
+      </div>
+    </div>`;
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  const ta = box.querySelector('#bc-bulk-ta');
+  const preview = box.querySelector('#bc-bulk-preview');
+  const countEl = box.querySelector('#bc-bulk-count');
+
+  function parseUrls(raw){
+    return raw.split('\n').map(u=>u.trim()).filter(u=>/^https?:\/\//i.test(u));
+  }
+
+  ta.addEventListener('input', ()=>{
+    const urls = parseUrls(ta.value);
+    countEl.textContent = urls.length ? `${urls.length} URL${urls.length>1?'s':''} detected` : '';
+    preview.style.display = 'none';
   });
-  bcSave();
-  bcLog(`Bulk imported ${urls.length} sites.`,'success');
-  bcRefresh();
+
+  box.querySelector('#bc-bulk-preview-btn').onclick = ()=>{
+    const urls = parseUrls(ta.value);
+    if(!urls.length){ preview.innerHTML='<span style="color:#cc0000">No valid URLs found.</span>'; preview.style.display=''; return; }
+    preview.innerHTML = urls.map(url=>{
+      const type = bcDetectPlatformFromUrl(url);
+      const label = bcPlatformLabel(type);
+      return `<div style="padding:2px 0;border-bottom:1px solid #eee;display:flex;gap:8px;align-items:center">
+        <span style="width:130px;flex-shrink:0">${label}</span>
+        <span style="color:#333;word-break:break-all">${url}</span>
+      </div>`;
+    }).join('');
+    preview.style.display = '';
+  };
+
+  function doAdd(){
+    const urls = parseUrls(ta.value);
+    if(!urls.length){ alert('No valid URLs found.'); return; }
+    let added=0;
+    urls.forEach(url=>{
+      const type = bcDetectPlatformFromUrl(url);
+      _bcSites.push({id:uid(),url,label:url,type,name:'',email:'',website:'',notes:'',done:false,queued:''});
+      added++;
+    });
+    bcSave();
+    bcLog(`Bulk imported ${added} sites (platform auto-detected).`,'success');
+    bcRefresh();
+    overlay.remove();
+    toast(`✔ Added ${added} URL${added>1?'s':''} to queue`,'s');
+  }
+
+  box.querySelector('#bc-bulk-add').onclick = doAdd;
+  box.querySelector('#bc-bulk-close').onclick  = ()=>overlay.remove();
+  box.querySelector('#bc-bulk-close2').onclick = ()=>overlay.remove();
+
+  setTimeout(()=>ta.focus(), 50);
 }
 
 function bcExportLog(){

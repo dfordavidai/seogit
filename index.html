@@ -6653,8 +6653,8 @@ let _bcCustomProxy = localStorage.getItem('bc_custom_proxy')||'';
 
 function bcGetVercelProxyUrl(targetUrl, isPost) {
   // Use YOUR Vercel backend as proxy — avoids public proxy IP bans
-  const apiBase = (railwayUrl() || 'https://seoparapro.vercel.app').replace(/\/+$/,'');
-  const secret  = railwaySecret(); // X-API-Key from Settings → Vercel Secret Key
+  const apiBase = (vercelUrl() || 'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const secret  = vercelSecret(); // X-API-Key from Settings → Vercel Secret Key
   if(isPost) {
     return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy', secret };
   } else {
@@ -6808,7 +6808,7 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
   const body = JSON.stringify(payload);
 
   // Try multiple proxies for JSON POST
-  const _vBase = (railwayUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
     // Vercel proxy FIRST — real IP, bypasses Cloudflare/spam filters
     { url: `${_vBase}/api/proxy`, vercel: true, direct: false },
@@ -6827,7 +6827,7 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
     try {
       const restFetchOpts = proxy.vercel ? {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(railwaySecret() ? {'X-API-Key': railwaySecret()} : {}) },
+        headers: { 'Content-Type': 'application/json', ...(vercelSecret() ? {'X-API-Key': vercelSecret()} : {}) },
         body: JSON.stringify({ url: restEndpoint, method: 'POST', body: payload, headers: { 'Content-Type': 'application/json' } })
       } : {
         method: 'POST',
@@ -6845,8 +6845,9 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
 
       if(resp.status===201 || resp.status===200){
         const status = json && json.status;
-        if(status==='hold') return { success:true, moderated:true, msg:'Comment queued for moderation (REST API)' };
-        return { success:true, moderated:false, msg:`Comment posted via REST API (ID: ${json&&json.id||'?'})` };
+        const proxyLbl = proxy.vercel ? 'vercel-proxy' : (proxy.label || (proxy.url||'').split('/')[2] || 'proxy');
+        if(status==='hold') return { success:true, moderated:true, msg:`Comment queued for moderation via REST API [${proxyLbl}] — HTTP ${resp.status}` };
+        return { success:true, moderated:false, msg:`Comment posted via REST API [${proxyLbl}] — HTTP ${resp.status} — ID: ${json&&json.id||'?'}` };
       }
       if(resp.status===403 && json && json.code==='comment_flood'){
         return { success:false, moderated:false, msg:'Flood protection — too many comments too fast' };
@@ -6929,7 +6930,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
   }
 
   // Referrer header mimics a real browser navigating from the post page
-  const _vBase2 = (railwayUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase2 = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
     // Vercel proxy FIRST — real server IP bypasses most blocks
     { vercel: true, url: `${_vBase2}/api/proxy` },
@@ -6945,12 +6946,13 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
     proxyTargets.unshift({ url: _bcCustomProxy.replace('{URL}',enc).replace('{url}',enc) || `${_bcCustomProxy}?url=${enc}` });
   }
 
-  for(const proxyUrl of proxyTargets){
+  for(const proxy of proxyTargets){
     try {
-      const isVercelProxy = proxy && proxy.vercel;
+      const isVercelProxy = !!(proxy && proxy.vercel);
+      const proxyUrl = proxy.url || proxy;
       const legacyFetchOpts = isVercelProxy ? {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(railwaySecret() ? {'X-API-Key': railwaySecret()} : {}) },
+        headers: { 'Content-Type': 'application/json', ...(vercelSecret() ? {'X-API-Key': vercelSecret()} : {}) },
         body: JSON.stringify({
           url: postUrl,
           method: 'POST',
@@ -6971,7 +6973,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
         body: params.toString()
       };
       const resp = await Promise.race([
-        fetch(isVercelProxy ? proxy.url : proxyUrl, legacyFetchOpts),
+        fetch(proxyUrl, legacyFetchOpts),
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),18000))
       ]);
 
@@ -7096,35 +7098,53 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
 
   logFn(`   → Generic form POST to: ${postUrl.slice(0,80)}...`,'info');
 
-  const proxyTargets = [
-    `https://corsproxy.io/?${encodeURIComponent(postUrl)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(postUrl)}`,
-    `https://thingproxy.freeboard.io/fetch/${postUrl}`,
-    `https://proxy.cors.sh/${postUrl}`,
+  const _vBaseG = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const genericProxyTargets = [
+    // Vercel proxy FIRST — real server IP, bypasses Cloudflare WAF
+    { vercel: true, url: `${_vBaseG}/api/proxy` },
+    { url: `https://corsproxy.io/?${encodeURIComponent(postUrl)}` },
+    { url: `https://api.allorigins.win/raw?url=${encodeURIComponent(postUrl)}` },
+    { url: `https://thingproxy.freeboard.io/fetch/${postUrl}` },
+    { url: `https://proxy.cors.sh/${postUrl}` },
   ];
   if(_bcCustomProxy){
     const enc = encodeURIComponent(postUrl);
-    proxyTargets.unshift(_bcCustomProxy.replace('{URL}',enc).replace('{url}',enc) || `${_bcCustomProxy}?url=${enc}`);
+    genericProxyTargets.unshift({ url: _bcCustomProxy.replace('{URL}',enc).replace('{url}',enc) || `${_bcCustomProxy}?url=${enc}` });
   }
 
-  for(const proxyUrl of proxyTargets){
+  for(const gProxy of genericProxyTargets){
     try {
+      const gUrl = gProxy.url || gProxy;
+      const isVercel = !!(gProxy && gProxy.vercel);
+      const gFetchOpts = isVercel ? {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(vercelSecret() ? {'X-API-Key': vercelSecret()} : {}) },
+        body: JSON.stringify({ url: postUrl, method: 'POST', body: params.toString(), headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': pageUrl } })
+      } : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': pageUrl },
+        body: params.toString()
+      };
       const resp = await Promise.race([
-        fetch(proxyUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': pageUrl },
-          body: params.toString()
-        }),
+        fetch(gUrl, gFetchOpts),
         new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timeout')),16000))
       ]);
       const text = await resp.text();
       const lower = text.toLowerCase();
+      const proxyLabel = isVercel ? 'vercel-proxy' : (gProxy.label || gUrl.split('/')[2] || gUrl.slice(0,30));
       if(resp.status===201||resp.redirected||(resp.status===200&&(lower.includes('thank')||lower.includes('success')||lower.includes('posted')||lower.includes('received')||lower.includes('submitt')))){
-        return { success:true, moderated:false, msg:`Generic form submitted (HTTP ${resp.status})` };
+        logFn(`   ✅ Generic form: HTTP ${resp.status} success via [${proxyLabel}]`,'success');
+        return { success:true, moderated:false, msg:`Generic form submitted (HTTP ${resp.status}) via ${proxyLabel}` };
+      }
+      if(lower.includes('awaiting')||lower.includes('moderat')||lower.includes('pending')){
+        logFn(`   ⏳ Generic form: pending moderation via [${proxyLabel}]`,'success');
+        return { success:true, moderated:true, msg:`Submitted — pending moderation (HTTP ${resp.status}) via ${proxyLabel}` };
       }
       if(resp.status>=200&&resp.status<400){
-        return { success:true, moderated:true, msg:`Submitted (HTTP ${resp.status}) — verify on site` };
+        logFn(`   ⏳ Generic form: HTTP ${resp.status} via [${proxyLabel}] — verify on site`,'warn');
+        return { success:true, moderated:true, msg:`Submitted (HTTP ${resp.status}) via ${proxyLabel} — verify on site` };
       }
+      logFn(`   ⚠ Generic: HTTP ${resp.status} via [${proxyLabel}] — trying next proxy`,'warn');
     } catch(e){ continue; }
   }
   return { success:false, moderated:false, msg:'Generic POST failed — site likely blocks proxy IPs. Use Manual Assist.' };
@@ -7351,14 +7371,35 @@ async function bcStartRun(){
       const postResult = await bcCommentOnSite(site, siteName, siteEmail, siteWebsite, siteComment, (msg,type)=>bcTermLog(msg,type));
 
       if(postResult.success && !postResult.moderated){
-        bcTermLog(`   ✅ COMMENT POSTED!`,'success');
+        bcTermLog(`   ✅ COMMENT POSTED — LIVE ✅`,'success');
         bcTermLog(`   → ${esc(postResult.msg)}`,'muted');
+        bcTermLog(`   💬 Comment: "${esc(siteComment.slice(0,90))}${siteComment.length>90?'...':''}"`, 'accent');
+        bcTermLog(`   👤 Identity: ${esc(siteName)} &lt;${esc(siteEmail)}&gt;${siteWebsite?' | '+esc(siteWebsite):''}`, 'muted');
+        // Show clickable link in terminal
+        const term = document.getElementById('bc-terminal');
+        if(term){
+          const linkDiv = document.createElement('div');
+          linkDiv.className = 'tline';
+          linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 Verify: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          term.appendChild(linkDiv);
+          term.scrollTop = term.scrollHeight;
+        }
         result.status='success'; result.reason=postResult.msg;
         site.done=true; site.queued=siteComment; bcSave();
         success++;
       } else if(postResult.success && postResult.moderated){
-        bcTermLog(`   ⏳ Comment submitted — awaiting moderation`,'success');
+        bcTermLog(`   ⏳ COMMENT SUBMITTED — AWAITING MODERATION`,'success');
         bcTermLog(`   → ${esc(postResult.msg)}`,'muted');
+        bcTermLog(`   💬 Comment: "${esc(siteComment.slice(0,90))}${siteComment.length>90?'...':''}"`, 'accent');
+        bcTermLog(`   👤 Identity: ${esc(siteName)} &lt;${esc(siteEmail)}&gt;${siteWebsite?' | '+esc(siteWebsite):''}`, 'muted');
+        const termM = document.getElementById('bc-terminal');
+        if(termM){
+          const linkDivM = document.createElement('div');
+          linkDivM.className = 'tline';
+          linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Check later: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          termM.appendChild(linkDivM);
+          termM.scrollTop = termM.scrollHeight;
+        }
         result.status='moderated'; result.reason=postResult.msg;
         site.done=true; site.queued=siteComment; bcSave();
         success++;
@@ -13069,7 +13110,7 @@ function renderCaptchaSolver(el){
     </div>
     <div style="margin-top:8px;font-family:var(--mono);font-size:11px">
       <span id="cap-builtin-stats" style="color:var(--accent)">Solved: 0 / Failed: 0 / Total: 0</span>
-      <span style="margin-left:16px;color:var(--muted2)">Vercel: <span id="cap-railway-status" style="font-weight:700">${railwayEnabled()?'<span style=\'color:#3ecf8e\'>Connected ✓</span>':'<span style=\'color:#e88\'>Not configured — browser fallback only</span>'}</span></span>
+      <span style="margin-left:16px;color:var(--muted2)">Vercel: <span id="cap-vercel-status" style="font-weight:700">${vercelEnabled()?'<span style=\'color:#3ecf8e\'>Connected ✓</span>':'<span style=\'color:#e88\'>Not configured — browser fallback only</span>'}</span></span>
     </div>
   </div>
 
@@ -14247,10 +14288,9 @@ const SETTINGS_DEFAULTS = {
   anc_genericRatio:      10,
   vercel_url:            '',
   vercel_connected:      false,
-  railway_connected:     false,
+  vercel_timeout:        15000,
   vercel_secret:         '',
   vercel_enabled:        false,
-  railway_timeout:       15000,
   supa_url:              'https://zamwlorvstesvxvvzijo.supabase.co',
   supa_anon_key:         'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphbXdsb3J2c3Rlc3Z4dnZ6aWpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYwMDA1MzQsImV4cCI6MjA5MTU3NjUzNH0.Uk3m073ljJHadb8z1v9ftcUKxOODp-APKSyI0Xh5-Ac',
   supa_service_key:      '',
@@ -14676,8 +14716,8 @@ function renderSettings(el) {
     sField('vercel_timeout','Vercel Timeout','number',{min:5000,max:60000,step:1000,unit:'ms',hint:'Max wait for Vercel API response'})
   )}
   <div style="padding:6px 14px 10px">
-    <button class="btn btn-sm" onclick="testRailwayConnection()" style="border-color:#0070f3;color:#0070f3;font-weight:700">▲ Test Vercel Connection</button>
-    <span id="railway-status-msg" style="margin-left:10px;font-size:10px;font-family:var(--mono)">${settingGet('vercel_connected')?'<span style="color:#3ecf8e">✓ Previously connected</span>':'<span style="color:#888">Not tested yet</span>'}</span>
+    <button class="btn btn-sm" onclick="testVercelConnection()" style="border-color:#0070f3;color:#0070f3;font-weight:700">▲ Test Vercel Connection</button>
+    <span id="vercel-status-msg" style="margin-left:10px;font-size:10px;font-family:var(--mono)">${settingGet('vercel_connected')?'<span style="color:#3ecf8e">✓ Previously connected</span>':'<span style="color:#888">Not tested yet</span>'}</span>
   </div>
 
   </div></div>
@@ -15653,10 +15693,10 @@ async function supaLoadAll(){
 
 // ── Generic Vercel POST helper ────────────────────────────────────────────
 async function backendPost(path, body, timeoutMs=30000){
-  const url = railwayUrl();
+  const url = vercelUrl();
   if(!url) throw new Error('Vercel backend URL not configured in Settings → Vercel Backend');
   const h = {'Content-Type':'application/json'};
-  if(railwaySecret()) h['X-API-Key'] = railwaySecret();
+  if(vercelSecret()) h['X-API-Key'] = vercelSecret();
   // Vercel Serverless Functions live under /api/
   const apiPath = path.startsWith('/api/') ? path : '/api' + (path.startsWith('/') ? path : '/' + path);
   const res = await fetch(url + apiPath, {
@@ -15672,10 +15712,10 @@ async function backendPost(path, body, timeoutMs=30000){
 }
 
 async function backendGet(path, timeoutMs=15000){
-  const url = railwayUrl();
+  const url = vercelUrl();
   if(!url) throw new Error('Vercel backend URL not configured in Settings → Vercel Backend');
   const h = {};
-  if(railwaySecret()) h['X-API-Key'] = railwaySecret();
+  if(vercelSecret()) h['X-API-Key'] = vercelSecret();
   const apiPath = path.startsWith('/api/') ? path : '/api' + (path.startsWith('/') ? path : '/' + path);
   const res = await fetch(url + apiPath, {headers:h, signal:AbortSignal.timeout(timeoutMs)});
   if(!res.ok) throw new Error('Backend GET '+apiPath+' failed: '+res.status);
@@ -15763,7 +15803,7 @@ async function capSolve(opts={}){
   CAP_BUILTIN.stats.total++;
 
   // 1. Try Vercel backend built-in solver first (most capable)
-  if(railwayEnabled()){
+  if(vercelEnabled()){
     try {
       const res = await backendPost('/captcha/solve', {
         type, site_key:siteKey, site_url:siteUrl,
@@ -15791,7 +15831,7 @@ async function capSolve(opts={}){
     }
   }
 
-  // 2. Browser-side fallbacks (when Railway not configured)
+  // 2. Browser-side fallbacks (when Vercel not configured)
   let token = null;
   let answer = null;
 
@@ -16075,7 +16115,7 @@ async function capTestSolve(){
   }
 
   CAP_STATE.jobs.unshift({
-    time:ts(), service: result.source==='railway'?'Built-in (Railway)':'Built-in (Browser)',
+    time:ts(), service: result.source==='vercel'?'Built-in (Vercel)':'Built-in (Browser)',
     type:type.name, solveTime:elapsed,
     token:result.token?String(result.token).slice(0,40)+'…':'—',
     status:result.solved?'solved':'failed'
@@ -16095,7 +16135,7 @@ async function rtCheckAllEnhanced(){
   if(RT.running){ toast('Already running','w'); return; }
   if(!RT.jobs.length){ toast('Add keywords first','w'); return; }
 
-  if(railwayEnabled()){
+  if(vercelEnabled()){
     // Use backend /rank-check for server-side checking (API key stays private)
     RT.running = true;
     const term = document.getElementById('rt-terminal');
@@ -16120,7 +16160,7 @@ async function rtCheckAllEnhanced(){
         if(!j.history) j.history=[];
         if(res.position) j.history.push(res.position);
         const change = j.prev&&j.position?(j.position<j.prev?`▲${j.prev-j.position}`:j.position>j.prev?`▼${j.position-j.prev}`:'→'):'';
-        log(`  Position #${res.position||'not found'} ${change} [via Railway]`, res.position&&res.position<=10?'t-accent':'t-info');
+        log(`  Position #${res.position||'not found'} ${change} [via Vercel]`, res.position&&res.position<=10?'t-accent':'t-info');
       } catch(e){
         log(`  Error: ${e.message}`,'t-error');
       }
@@ -16152,7 +16192,7 @@ async function serpRunScrapeEnhanced(){
   if(!kws.length){ serpLog && serpLog('⚠ Enter at least one keyword','t-warn'); return; }
   if(!selEngines.length){ serpLog && serpLog('⚠ Select at least one engine','t-warn'); return; }
 
-  if(railwayEnabled()){
+  if(vercelEnabled()){
     if(SERP_STATE) SERP_STATE.running=true;
     const btn=document.getElementById('serp-run-btn'); if(btn) btn.disabled=true;
     serpLog && serpLog(`Scraping via Vercel backend: ${kws.length} kw(s) × ${selEngines.length} engine(s)`,'t-accent');
@@ -16186,7 +16226,7 @@ window.serpRunScrape = serpRunScrapeEnhanced;
 // ── Schedule Poller — checks backend for pending schedules every 2 min ───
 (function startSchedulePoller(){
   async function poll(){
-    if(!railwayEnabled()) return;
+    if(!vercelEnabled()) return;
     try {
       const res = await backendSchedulePending();
       if(res.pending && res.pending.length > 0){
@@ -16205,29 +16245,29 @@ window.serpRunScrape = serpRunScrapeEnhanced;
 })();
 
 // ═══════════════════════════════════════════════════════════════
-// RAILWAY BACKEND INTEGRATION
+// VERCEL BACKEND INTEGRATION
 // ═══════════════════════════════════════════════════════════════
 
-function railwayUrl(){ return (settingGet('vercel_url')||settingGet('railway_url')||'').replace(/\/$/,''); }
-function railwaySecret(){ return settingGet('vercel_secret')||settingGet('railway_secret')||''; }
-function railwayEnabled(){ return !!((settingGet('vercel_enabled')||settingGet('railway_enabled')) && railwayUrl()); }
+function vercelUrl(){ return (settingGet('vercel_url')||settingGet('railway_url')||'').replace(/\/$/,''); }
+function vercelSecret(){ return settingGet('vercel_secret')||settingGet('railway_secret')||''; }
+function vercelEnabled(){ return !!((settingGet('vercel_enabled')||settingGet('railway_enabled')) && vercelUrl()); }
 
-function railwayHeaders(){
+function vercelHeaders(){
   const h = { 'Content-Type': 'application/json' };
-  if(railwaySecret()) h['X-API-Key'] = railwaySecret();
+  if(vercelSecret()) h['X-API-Key'] = vercelSecret();
   return h;
 }
 
 /**
  * Make a CORS-safe fetch via the Vercel backend proxy.
- * Falls back to direct fetch if Railway is not configured.
+ * Falls back to direct fetch if Vercel is not configured.
  */
-async function railwayFetch(url, opts={}){
-  if(!railwayEnabled()){
+async function vercelFetch(url, opts={}){
+  if(!vercelEnabled()){
     // Direct fetch fallback (may fail due to CORS on some targets)
     return fetch(url, opts);
   }
-  const timeout = settingGet('railway_timeout') || 20000;
+  const timeout = settingGet('vercel_timeout') || 20000;
   const body = {
     url,
     method: opts.method || 'GET',
@@ -16235,13 +16275,13 @@ async function railwayFetch(url, opts={}){
     body: opts.body || null,
     timeout: timeout / 1000,
   };
-  const res = await fetch(railwayUrl() + '/api/proxy', {
+  const res = await fetch(vercelUrl() + '/api/proxy', {
     method: 'POST',
-    headers: railwayHeaders(),
+    headers: vercelHeaders(),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeout + 5000),
   });
-  if(!res.ok) throw new Error('Railway proxy error: ' + res.status);
+  if(!res.ok) throw new Error('Vercel proxy error: ' + res.status);
   const data = await res.json();
   // Return a Response-like object so callers can use .ok / .status / .text() / .json()
   return {
@@ -16250,42 +16290,41 @@ async function railwayFetch(url, opts={}){
     text: async () => data.text,
     json: async () => { try{ return JSON.parse(data.text); } catch(e){ throw new Error('JSON parse failed: ' + data.text?.slice(0,100)); } },
     redirected: data.redirected,
-    _proxy: data.proxy || 'railway',
+    _proxy: data.proxy || 'vercel',
   };
 }
 
 /**
- * Relay a Supabase call through Railway (uses service key server-side).
+ * Relay a Supabase call through Vercel (uses service key server-side).
  * Use this for admin operations. Normal reads/writes use supaFetch() directly.
  */
-async function railwaySupabase(endpoint, method='GET', body=null, useServiceKey=false){
-  if(!railwayEnabled()) throw new Error('Vercel backend not configured');
-  const res = await fetch(railwayUrl() + '/api/supabase', {
+async function vercelSupabase(endpoint, method='GET', body=null, useServiceKey=false){
+  if(!vercelEnabled()) throw new Error('Vercel backend not configured');
+  const res = await fetch(vercelUrl() + '/api/supabase', {
     method: 'POST',
-    headers: railwayHeaders(),
+    headers: vercelHeaders(),
     body: JSON.stringify({ endpoint, method, body, use_service_key: useServiceKey }),
   });
-  if(!res.ok) throw new Error('Railway Supabase relay error: ' + res.status);
+  if(!res.ok) throw new Error('Vercel Supabase relay error: ' + res.status);
   return res.json();
 }
 
 /**
- * Test Railway connection from Settings page.
+ * Test Vercel connection from Settings page.
  */
-async function testRailwayConnection(){
-  const url = railwayUrl();
+async function testVercelConnection(){
+  const url = vercelUrl();
   if(!url){ toast('Enter Vercel API URL first','e'); return; }
-  const statusEl = document.getElementById('railway-status-msg');
+  const statusEl = document.getElementById('vercel-status-msg');
   if(statusEl) statusEl.innerHTML = '<span class="blink">⟳</span> Testing...';
   try {
     const res = await fetch(url + '/api/health', {
-      headers: railwaySecret() ? {'X-API-Key': railwaySecret()} : {},
+      headers: vercelSecret() ? {'X-API-Key': vercelSecret()} : {},
       signal: AbortSignal.timeout(10000),
     });
     const data = await res.json().catch(()=>({service:'Vercel backend'}));
     if(res.ok){
       settingSet('vercel_connected', true);
-      settingSet('railway_connected', true);
       if(statusEl) statusEl.innerHTML = '<span style="color:#3ecf8e">✓ Connected — ' + (data.service||'Vercel backend') + ' v' + (data.version||'1.0') + ' · Supabase: ' + (data.supabase_configured?'✓':'✗ not configured on server') + '</span>';
       toast('Vercel backend connected!','s');
     } else {
@@ -16293,7 +16332,6 @@ async function testRailwayConnection(){
     }
   } catch(e) {
     settingSet('vercel_connected', false);
-    settingSet('railway_connected', false);
     if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ ' + e.message + '</span>';
     toast('Vercel connection failed: ' + e.message,'e');
   }
@@ -18005,7 +18043,7 @@ async function waitIfPaused(){ while(CAMPAIGN_CTRL.paused){ await sleep(500); } 
 // State already loaded by loadState() at S definition time above
 // Migrate legacy railway_ settings keys to vercel_ on first boot
 (function migrateRailwayToVercel(){
-  const map = {railway_url:'vercel_url',railway_secret:'vercel_secret',railway_enabled:'vercel_enabled',railway_timeout:'vercel_timeout',railway_connected:'vercel_connected'};
+  const map = {railway_url:'vercel_url',railway_secret:'vercel_secret',railway_enabled:'vercel_enabled',railway_timeout:'vercel_timeout',railway_connected:'vercel_connected',vercel_timeout:'vercel_timeout'};
   let migrated=0;
   for(const [oldKey,newKey] of Object.entries(map)){
     const val = localStorage.getItem(oldKey);

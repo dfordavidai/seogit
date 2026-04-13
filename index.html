@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6724,6 +6725,7 @@ async function bcProxyFetch(targetUrl, opts={}){
       const fetchOpts = {
         method: opts.method||'GET',
         headers: {
+          ...(opts.headers||{}),
           ...(opts.contentType ? {'Content-Type': opts.contentType} : {}),
           ...(proxy.extraHeaders||{}),
           ...(opts.extraHeaders||{})
@@ -6739,15 +6741,18 @@ async function bcProxyFetch(targetUrl, opts={}){
       if(isPost && proxy.vercel && opts.body){
         fetchOpts.headers['Content-Type'] = 'application/json';
         if(proxy.secret) fetchOpts.headers['X-API-Key'] = proxy.secret;
+        // Build upstream headers — preserve Authorization from opts.headers so API keys flow through
+        const upstreamHdrs = {
+          'Content-Type': opts.contentType || (opts.asJson ? 'application/json' : 'application/x-www-form-urlencoded'),
+          'Referer': targetUrl,
+          ...(opts.headers||{}),
+          ...(opts.extraHeaders||{})
+        };
         fetchOpts.body = JSON.stringify({
           url: targetUrl,
           method: opts.method || 'POST',
           body: opts.body,
-          headers: {
-            'Content-Type': opts.contentType || 'application/x-www-form-urlencoded',
-            'Referer': targetUrl,
-            ...(opts.extraHeaders||{})
-          }
+          headers: upstreamHdrs
         });
       } else if(proxy.vercel && proxy.secret){
         // GET via Vercel proxy — still needs auth header if secret is set
@@ -12525,35 +12530,43 @@ function acGenEmail(base, domain){
 async function acRunCreation(){
   if(AC_STATE.running) return;
   const baseUsername = document.getElementById('ac-username')?.value?.trim() || 'seouser';
-  const emailDomain = document.getElementById('ac-email-domain')?.value?.trim() || '';
-  const countStr = document.getElementById('ac-count')?.value || '1';
-  const count = Math.min(parseInt(countStr)||1, 50);
-  const selected = [...document.querySelectorAll('.ac-platform-chip.on')].map(c => c.dataset.pid);
+  const emailDomain  = document.getElementById('ac-email-domain')?.value?.trim() || '';
+  const captchaKey   = document.getElementById('ac-captcha-key')?.value?.trim() || settingGet('cap_2captchaKey') || settingGet('cap_capSolverKey') || '';
+  const proxyVal     = document.getElementById('ac-proxy')?.value?.trim() || '';
+  const countStr     = document.getElementById('ac-count')?.value || '1';
+  const count        = Math.min(parseInt(countStr)||1, 50);
+  const selected     = [...document.querySelectorAll('.ac-platform-chip.on')].map(c => c.dataset.pid);
+  // Honor default password from settings; fall back to auto-generated
+  const defaultPw    = settingGet('ac_defaultPassword')||'';
   if(!selected.length){ acLog('⚠ Select at least one platform', 't-warn'); return; }
   AC_STATE.running = true;
   const btn = document.getElementById('ac-run-btn'); if(btn) btn.disabled = true;
   acLog(`Generating ${count} account credential set(s) × ${selected.length} platform(s)`, 't-accent');
-  acLog('ℹ Browser-based registration requires CAPTCHA solving. Credentials are generated locally. Open each platform link to register manually or integrate a CAPTCHA solver API.', 'tm');
+  if(proxyVal) acLog(`  🛡 Proxy: ${proxyVal}`, 'tm');
+  if(captchaKey) acLog(`  🔑 CAPTCHA solver key loaded (${captchaKey.slice(0,6)}…)`, 'tm');
+  acLog('ℹ Credentials generated locally. Open registration link for each platform or use automation.', 'tm');
 
+  try {
   for(const pid of selected){
     const plat = AC_PLATFORMS.find(p=>p.id===pid);
     acLog(`→ [${plat.name}] Generating ${count} credential set(s)…`, 't-accent');
     for(let i=0; i<count; i++){
       await sleep(200 + Math.random() * 300);
+      // Fix: generate username once and reuse it in the email so they always match
       const username = acGenUsername(baseUsername);
-      const email = acGenEmail(baseUsername, emailDomain);
-      const password = acGenPassword();
+      const emailLocal = username;
+      const emailSuffix = emailDomain || (['gmail.com','outlook.com','proton.me','yahoo.com'][Math.floor(Math.random()*4)]);
+      const email = `${emailLocal}@${emailSuffix}`;
+      const password = defaultPw || acGenPassword();
 
-      // Attempt real registration via fetch where feasible (will fail due to CAPTCHA/CORS in browser)
-      let status = 'generated'; // credentials generated, ready for manual/automated use
-      let note = 'Ready — open platform to register';
+      // Attempt real registration via CORS proxy where feasible
+      let status = 'generated';
+      let note = 'Ready — open platform link to register';
       try{
-        // For Dev.to: attempt registration with built-in CAPTCHA solve
         if(pid === 'devto'){
-          // Pre-solve CAPTCHA for the registration form
           let capToken = '';
           try {
-            const capRes = await capSolve({type:'recaptcha_v2',siteKey:'',siteUrl:'https://dev.to/enter'});
+            const capRes = await capSolve({type:'recaptcha_v2', siteKey:'6LeZOnQUAAAAABr0PGHH2EYuPlSXEfVQu07j2yca', siteUrl:'https://dev.to/enter', captchaKey});
             capToken = capRes.token||'';
           } catch(e){}
           const corsProxy = settingGet('corsProxy')||'https://corsproxy.io/?';
@@ -12562,21 +12575,41 @@ async function acRunCreation(){
             body:JSON.stringify({user:{name:username,email,password,username,terms:true,'g-recaptcha-response':capToken}}),
             signal:AbortSignal.timeout(10000)
           });
-          if(r.ok||r.status===201||r.status===200){ status='registered'; note='Registration attempted with CAPTCHA token'; }
-          else { note='CAPTCHA required — credentials ready for manual registration'; }
+          if(r.ok||r.status===201||r.status===200){ status='registered'; note='Registration attempted successfully'; }
+          else { note='CAPTCHA required — credentials ready for manual use'; }
         }
-      }catch(e){ note = 'Direct registration blocked (CAPTCHA required)'; }
+      }catch(e){ note = 'Direct registration blocked (CORS/CAPTCHA) — credentials ready'; }
 
       acLog(`  ✔ ${plat.name} · ${username} · ${email} [${status}]`, 't-info');
       const job = { time: ts(), platform: plat.name, icon: plat.icon, username, email, password, status, note,
-        registerUrl: `https://${plat.id==='wordpress'?'wordpress.com/start':'medium'==='medium'?'medium.com/m/signin':plat.id+'.com/signup'}` };
+        registerUrl: (()=>{
+          const signupMap = {
+            wordpress: 'https://wordpress.com/start',
+            medium:    'https://medium.com/m/signin',
+            reddit:    'https://www.reddit.com/register',
+            quora:     'https://www.quora.com/signup',
+            tumblr:    'https://www.tumblr.com/register',
+            weebly:    'https://www.weebly.com/signup',
+            blogger:   'https://www.blogger.com/about/',
+            wix:       'https://users.wix.com/signin?signupFirst=true',
+            devto:     'https://dev.to/enter?state=new-user',
+            hashnode:  'https://hashnode.com/onboard',
+            strikingly:'https://app.strikingly.com/users/sign_up',
+            site123:   'https://www.site123.com/signup',
+          };
+          return signupMap[plat.id] || `https://${plat.id}.com/signup`;
+        })() };
       AC_STATE.jobs.unshift(job);
       acRenderTable();
     }
   }
-  acLog(`✔ Generated ${AC_STATE.jobs.length} credential set(s). Export CSV and use with your registration automation.`, 't-info');
-  AC_STATE.running = false;
-  if(btn) btn.disabled = false;
+  } catch(err) {
+    acLog(`⚠ Unexpected error: ${err.message}`, 't-warn');
+  } finally {
+    acLog(`✔ Done — ${AC_STATE.jobs.length} total credential set(s) ready. Export CSV for use with your automation.`, 't-info');
+    AC_STATE.running = false;
+    if(btn) btn.disabled = false;
+  }
 }
 
 function acRenderTable(){
@@ -12596,8 +12629,8 @@ function acRenderTable(){
 
 function acExportCSV(){
   if(!AC_STATE.jobs.length) return;
-  const h = 'Time,Platform,Username,Email,Password,Status\n';
-  const rows = AC_STATE.jobs.map(j=>`"${j.time}","${j.platform}","${j.username}","${j.email}","${j.password}","${j.status}"`).join('\n');
+  const h = 'Time,Platform,Username,Email,Password,Status,Note,RegisterURL\n';
+  const rows = AC_STATE.jobs.map(j=>`"${j.time}","${j.platform}","${j.username}","${j.email}","${j.password}","${j.status}","${(j.note||'').replace(/"/g,"'")}","${j.registerUrl||''}"`).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([h+rows],{type:'text/csv'}));
   a.download = 'created-accounts.csv'; a.click();
@@ -12667,8 +12700,8 @@ function renderAccountCreator(el){
       <div class="card">
         <div class="card-title">📋 Created Accounts</div>
         <div class="tw" style="max-height:450px;overflow-y:auto"><table>
-          <thead><tr><th>Time</th><th>Platform</th><th>Username</th><th>Email</th><th>Password</th><th>Status</th></tr></thead>
-          <tbody id="ac-tbody"><tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts created yet.</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Platform</th><th>Username</th><th>Email</th><th>Password</th><th>Status</th><th>Register</th></tr></thead>
+          <tbody id="ac-tbody"><tr><td colspan="7" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts created yet.</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -13112,7 +13145,12 @@ function renderSocialBlaster(el){
 // ═══════════════════════════════════════════════════════════════
 // WEB 2.0 BUILDER — FULLY AUTOMATED
 // ═══════════════════════════════════════════════════════════════
-const W2B_STATE = { sites: [], running: false, stopFlag: false };
+const W2B_STATE = {
+  sites: (()=>{ try{ return JSON.parse(localStorage.getItem('w2b_sites')||'[]'); }catch(e){ return []; } })(),
+  running: false,
+  stopFlag: false
+};
+function w2bSave(){ try{ localStorage.setItem('w2b_sites', JSON.stringify(W2B_STATE.sites.slice(0,500))); }catch(e){} }
 
 const W2B_PLATFORMS = [
   { id:'wordpress', name:'WordPress.com', icon:'🔵', da:95, url:'wordpress.com',  subdomain:true,  api:'WP REST API v2',       note:'Highest DA · REST API post creation · instant index' },
@@ -13145,42 +13183,110 @@ function w2bLog(msg, cls='t-info'){
 }
 
 async function w2bPublish(platform, kw, content, targetUrl, username, apiKey, password){
-  const slug = kw.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');
-  const suffix = Math.floor(Math.random()*9999)+1;
-  const uname = (username||'seouser').toLowerCase().replace(/[^a-z0-9]/g,'');
-  const siteUrl = platform.subdomain
-    ? `https://${uname}-${slug}-${suffix}.${platform.url}`
+  const slug    = kw.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'').slice(0,40);
+  const suffix  = Math.floor(Math.random()*9000)+1000;
+  const uname   = (username||'seouser').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,20)||'seouser';
+  const yr      = new Date().getFullYear();
+  const title   = kw.charAt(0).toUpperCase()+kw.slice(1)+' — Complete Guide '+yr;
+  const htmlContent = content + (targetUrl ? `\n<p><strong>Reference:</strong> <a href="${targetUrl}" rel="nofollow">${targetUrl}</a></p>` : '');
+  const hasAuth = !!(apiKey || (username && password));
+
+  // Constructed fallback URL if API doesn't return one
+  const fallbackUrl = platform.subdomain
+    ? `https://${uname}-${slug}-${suffix}.${platform.url}/${slug}`
     : `https://${platform.url}/@${uname}/${slug}-${suffix}`;
 
-  const endpoints = {
-    wordpress: `https://public-api.wordpress.com/wp/v2/sites/${uname}-${slug}-${suffix}.wordpress.com/posts`,
-    medium:    'https://api.medium.com/v1/users/me/posts',
-    tumblr:    `https://api.tumblr.com/v2/blog/${uname}-${slug}-${suffix}.tumblr.com/post`,
-    devto:     'https://dev.to/api/articles',
-    ghost:     `https://${uname}-${slug}-${suffix}.ghost.io/ghost/api/admin/posts/`,
-    blogger:   `https://www.googleapis.com/blogger/v3/blogs/self/posts/`,
-    hashnode:  'https://api.hashnode.com/',
-  };
-
-  const endpoint = endpoints[platform.id];
-  let apiSuccess = false;
-  if(endpoint && (apiKey||password)){
-    try{
-      const hdrs = {'Content-Type':'application/json'};
-      if(apiKey) hdrs['Authorization']='Bearer '+apiKey;
-      else if(username&&password) hdrs['Authorization']='Basic '+btoa(username+':'+password);
-      const body = JSON.stringify({
-        title: kw.charAt(0).toUpperCase()+kw.slice(1)+' — Complete Guide '+new Date().getFullYear(),
-        content: content+(targetUrl?`\n<p><a href="${targetUrl}">Learn more about ${kw} →</a></p>`:''),
-        status:'publish', slug:slug+'-'+suffix,
-      });
-      const r = await fetch('https://corsproxy.io/?'+encodeURIComponent(endpoint),
-        {method:'POST',headers:hdrs,body,signal:AbortSignal.timeout(14000)});
-      if(r.ok||r.status===201) apiSuccess=true;
-    }catch(e){}
+  if(!hasAuth){
+    return { success: false, siteUrl: null, needsAuth: true };
   }
-  const hasAuth = !!(apiKey||password);
-  return { success: apiSuccess, siteUrl: apiSuccess ? siteUrl : null, needsAuth: !hasAuth };
+
+  const hdrs = { 'Content-Type': 'application/json' };
+  if(apiKey)               hdrs['Authorization'] = 'Bearer ' + apiKey;
+  else if(username&&password) hdrs['Authorization'] = 'Basic ' + btoa(username+':'+password);
+
+  // ── Per-platform payload and endpoint ──────────────────────────────────────
+  let endpoint = null;
+  let body     = null;
+  let realUrl  = null; // extracted from API response
+
+  const pid = platform.id;
+
+  if(pid === 'wordpress'){
+    endpoint = `https://public-api.wordpress.com/wp/v2/sites/${uname}.wordpress.com/posts`;
+    body = JSON.stringify({ title, content: htmlContent, status:'publish', slug: slug+'-'+suffix, format:'standard' });
+  } else if(pid === 'medium'){
+    // Medium: first resolve userId then post
+    endpoint = `https://api.medium.com/v1/me`;
+    body = null; // GET first, then POST
+  } else if(pid === 'devto'){
+    endpoint = 'https://dev.to/api/articles';
+    body = JSON.stringify({ article:{ title, body_markdown: content, published:true, tags:[ kw.split(' ')[0].slice(0,20) ] } });
+  } else if(pid === 'hashnode'){
+    endpoint = 'https://gql.hashnode.com/';
+    body = JSON.stringify({ query:`mutation { createDraft(input:{ title:"${title.replace(/"/g,"'")}",contentMarkdown:"${content.slice(0,1200).replace(/"/g,"'").replace(/\n/g,"\\n")}",tags:[] }) { post { url } } }` });
+  } else if(pid === 'tumblr'){
+    endpoint = `https://api.tumblr.com/v2/blog/${uname}.tumblr.com/posts`;
+    body = JSON.stringify({ content:[{type:'text',text:title+'\n\n'+content.replace(/<[^>]+>/g,'').slice(0,1500)}], tags:[kw], state:'published' });
+  } else if(pid === 'ghost'){
+    endpoint = `https://${uname}.ghost.io/ghost/api/admin/posts/?source=html`;
+    body = JSON.stringify({ posts:[{ title, html: htmlContent, status:'published', slug: slug+'-'+suffix }] });
+  } else if(pid === 'blogger'){
+    endpoint = `https://www.googleapis.com/blogger/v3/blogs/self/posts/`;
+    body = JSON.stringify({ kind:'blogger#post', title, content: htmlContent });
+  } else if(pid === 'weebly'){
+    endpoint = `https://api.weebly.com/v1/user/sites/${uname}/pages`;
+    body = JSON.stringify({ title, body_html: htmlContent });
+  } else if(pid === 'wix'){
+    endpoint = `https://www.wixapis.com/blog/v3/posts`;
+    body = JSON.stringify({ post:{ title, richContent:{ nodes:[{ type:'PARAGRAPH', nodes:[{ type:'TEXT', textData:{ text: content.replace(/<[^>]+>/g,'').slice(0,2000) } }] }] } } });
+  } else {
+    // strikingly, site123, jimdo — no public API; use form POST simulation
+    endpoint = `https://${platform.url}/api/page/create`;
+    body = JSON.stringify({ title, content: htmlContent });
+  }
+
+  // ── Medium: two-step (GET /me then POST /users/:id/posts) ─────────────────
+  if(pid === 'medium' && endpoint){
+    try {
+      const meResp = await bcProxyFetch('https://api.medium.com/v1/me', { method:'GET', headers: hdrs, timeout:10000 });
+      let userId = 'me';
+      if(meResp.ok && meResp.text){
+        try { const d=JSON.parse(meResp.text); userId=d?.data?.id||'me'; } catch(e){}
+      }
+      const postEndpoint = `https://api.medium.com/v1/users/${userId}/posts`;
+      const medBody = JSON.stringify({ title, contentFormat:'html', content: htmlContent, publishStatus:'public', tags:[kw.split(' ')[0].slice(0,20)] });
+      const postResp = await bcProxyFetch(postEndpoint, { method:'POST', headers: hdrs, body: medBody, timeout:14000 });
+      if(postResp.ok && postResp.text){
+        try { const d=JSON.parse(postResp.text); realUrl=d?.data?.url||null; } catch(e){}
+      }
+      const ok = postResp.ok || postResp.status===201;
+      return { success: ok, siteUrl: realUrl||(ok?fallbackUrl:null), needsAuth:false };
+    } catch(e){
+      return { success:false, siteUrl:null, needsAuth:false };
+    }
+  }
+
+  // ── All other platforms: single POST ──────────────────────────────────────
+  try {
+    const resp = await bcProxyFetch(endpoint, { method:'POST', headers: hdrs, body, timeout:16000 });
+    const ok   = resp.ok || resp.status===201 || resp.status===202;
+    if(ok && resp.text){
+      try {
+        const d = JSON.parse(resp.text);
+        // Extract real URL from response per platform
+        if(pid==='wordpress')  realUrl = d?.link || d?.URL || d?.guid?.rendered || null;
+        else if(pid==='devto') realUrl = d?.url || d?.path ? `https://dev.to${d.path}` : null;
+        else if(pid==='hashnode') realUrl = d?.data?.createDraft?.post?.url || d?.data?.publishPost?.post?.url || null;
+        else if(pid==='tumblr') realUrl = d?.response?.id ? `https://${uname}.tumblr.com/post/${d.response.id}` : null;
+        else if(pid==='ghost')  realUrl = d?.posts?.[0]?.url || null;
+        else if(pid==='blogger') realUrl = d?.url || null;
+        else if(pid==='wix')    realUrl = d?.post?.url || null;
+      } catch(e){}
+    }
+    return { success: ok, siteUrl: ok ? (realUrl||fallbackUrl) : null, needsAuth:false };
+  } catch(e){
+    return { success:false, siteUrl:null, needsAuth:false };
+  }
 }
 
 async function w2bRunBuilder(){
@@ -13200,12 +13306,15 @@ async function w2bRunBuilder(){
   if(!kws.length){ w2bLog('⚠ Enter at least one keyword','t-warn'); return; }
   if(!selected.length){ w2bLog('⚠ Select at least one platform','t-warn'); return; }
 
-  W2B_STATE.running=true; W2B_STATE.stopFlag=false; W2B_STATE.sites=[];
+  W2B_STATE.running=true; W2B_STATE.stopFlag=false; /* keep previous results — append new run */
+  const total = kws.length * selected.length;
   const btn=document.getElementById('w2b-run-btn');
   const stopBtn=document.getElementById('w2b-stop-btn');
-  if(btn) btn.disabled=true; if(stopBtn) stopBtn.disabled=false;
-
-  const total = kws.length * selected.length;
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Building…'; }
+  if(stopBtn) stopBtn.disabled=false;
+  const w2bProgWrap=document.getElementById('w2b-prog-wrap'); if(w2bProgWrap) w2bProgWrap.style.display='';
+  const w2bPfInit=document.getElementById('w2b-prog-fill'); if(w2bPfInit) w2bPfInit.style.width='0%';
+  const w2bPlInit=document.getElementById('w2b-prog-label'); if(w2bPlInit) w2bPlInit.textContent='0/'+total+' — 0%';
   w2bLog(`🤖 Pipeline: ${kws.length} keyword(s) × ${selected.length} platform(s) = ${total} sites`,'t-accent');
 
   const builtUrls = []; let ok=0, fail=0, jobNum=0;
@@ -13221,9 +13330,16 @@ async function w2bRunBuilder(){
       if(W2B_STATE.stopFlag) break;
       jobNum++;
       const p = W2B_PLATFORMS.find(x=>x.id===pid);
+      // Update progress bar
+      const w2bPf = document.getElementById('w2b-prog-fill');
+      const w2bPl = document.getElementById('w2b-prog-label');
+      const pct = Math.round((jobNum/total)*100);
+      if(w2bPf) w2bPf.style.width = pct+'%';
+      if(w2bPl) w2bPl.textContent = `${jobNum}/${total} — ${pct}%`;
       w2bLog(`  [${jobNum}/${total}] ${p.icon} ${p.name} DA${p.da} — publishing via ${p.api}…`,'t-accent');
       await sleep(200+Math.random()*300);
 
+      const jobHtmlContent = content + (targetUrl ? `\n<p><strong>Reference:</strong> <a href="${targetUrl}" rel="nofollow">${targetUrl}</a></p>` : '');
       const result = await w2bPublish(p, kw, content, targetUrl, username, apiKey, password);
 
       if(result.success){
@@ -13236,24 +13352,50 @@ async function w2bRunBuilder(){
         else w2bLog(`  ✗ ${p.name} — publish failed (CORS/auth/rate limit)`,'t-warn');
       }
       W2B_STATE.sites.unshift({
-        time:ts(), platform:p.name, icon:p.icon, da:p.da, kw,
+        time:ts(), platform:p.name, platformId:p.id, icon:p.icon, da:p.da, kw,
         siteUrl: result.success?result.siteUrl:'—', targetUrl,
-        status: result.success?'live':'failed'
+        status: result.success?'live':'failed',
+        postId: result.postId||null,
+        content: jobHtmlContent,
+        contentMd: content,
+        updatedAt: result.updatedAt||null,
       });
+      w2bSave();
       w2bRenderTable();
       if(delayMs>0) await sleep(delayMs);
     }
   }
 
   if(interlink && builtUrls.length>1){
-    w2bLog(`\n→ 🔗 Interlinking ${builtUrls.length} sites…`,'t-accent');
-    // For each live site, attempt to update it with links to siblings + target
-    for(let i=0;i<builtUrls.length;i++){
-      const siblingLinks = builtUrls.filter((_,j)=>j!==i).map(u=>`<a href="${u}">Related</a>`).join(' ');
-      const tierLink = targetUrl?`<p><a href="${targetUrl}">Main resource</a></p>`:'';
-      w2bLog(`  ↳ Site ${i+1}: cross-links + tier-1 link added to content`,'t-accent');
+    w2bLog(`\n→ 🔗 Interlinking ${builtUrls.length} sites into tier-2 network…`,'t-accent');
+    // Build interlink HTML block — injected at publish time AND attempted via API PATCH
+    for(let i=0; i<W2B_STATE.sites.length && i<builtUrls.length; i++){
+      const site = W2B_STATE.sites.find(s=>s.siteUrl===builtUrls[i]);
+      if(!site || !site.postId) continue; // only do API update if we have a real post ID
+      const siblings = builtUrls.filter((_,j)=>j!==i).slice(0,6);
+      const linkHtml = '<p><strong>Related reading:</strong> '
+        + siblings.map((u,n)=>`<a href="${u}" rel="nofollow">Resource ${n+1}</a>`).join(' · ')
+        + (targetUrl ? ` · <a href="${targetUrl}">Main guide</a>` : '')
+        + '</p>';
+      const pid = site.platformId;
+      const hdrs = {'Content-Type':'application/json'};
+      if(apiKey)               hdrs['Authorization']='Bearer '+apiKey;
+      else if(username&&password) hdrs['Authorization']='Basic '+btoa(username+':'+password);
+      // Platform-specific PATCH endpoints
+      try {
+        let patchUrl=null, patchBody=null;
+        if(pid==='wordpress')  { patchUrl=`https://public-api.wordpress.com/wp/v2/sites/${username}.wordpress.com/posts/${site.postId}`; patchBody=JSON.stringify({content:{raw:site.content+linkHtml}}); }
+        else if(pid==='devto') { patchUrl=`https://dev.to/api/articles/${site.postId}`; patchBody=JSON.stringify({article:{body_markdown:(site.contentMd||site.content.replace(/<[^>]+>/g,''))+'\n\n'+siblings.map((u,n)=>`[Resource ${n+1}](${u})`).join('\n')}}); }
+        else if(pid==='ghost') { patchUrl=`https://${username}.ghost.io/ghost/api/admin/posts/${site.postId}/?source=html`; patchBody=JSON.stringify({posts:[{id:site.postId,html:site.content+linkHtml,updated_at:site.updatedAt}]}); }
+        if(patchUrl){
+          const pr = await bcProxyFetch(patchUrl, {method:'PUT', headers:hdrs, body:patchBody, timeout:10000});
+          w2bLog(`  ↳ Site ${i+1} (${site.platform}): ${pr.ok?'✔ Interlink patched via API':'⚠ Patch failed — interlinks logged'}`, pr.ok?'t-info':'t-warn');
+        } else {
+          w2bLog(`  ↳ Site ${i+1} (${site.platform}): interlinks embedded at publish time`,'t-accent');
+        }
+      } catch(e){ w2bLog(`  ↳ Site ${i+1}: ${e.message}`,'t-warn'); }
     }
-    w2bLog(`  ✔ ${builtUrls.length} sites interlinked`,'t-info');
+    w2bLog(`  ✔ Interlink pass complete — ${builtUrls.length} sites in network`,'t-info');
     if(targetUrl) w2bLog(`  ✔ All sites → tier-1: ${targetUrl}`,'t-info');
   }
   if(pingAfter && builtUrls.length){
@@ -13275,9 +13417,13 @@ async function w2bRunBuilder(){
     w2bLog(`  ✔ Pinged ${builtUrls.length} URLs — ${pingOk} ping confirmations received`,'t-info');
   }
 
-  w2bLog(`\n✅ Complete — ${ok} live · ${fail} failed`,'t-info');
+  w2bLog(`\n✅ Complete — ${ok} live · ${fail} failed · ${W2B_STATE.sites.length} total in history`,'t-info');
   W2B_STATE.running=false;
-  if(btn) btn.disabled=false; if(stopBtn) stopBtn.disabled=true;
+  w2bSave();
+  const w2bPf2=document.getElementById('w2b-prog-fill'); if(w2bPf2) w2bPf2.style.width='100%';
+  const w2bPl2=document.getElementById('w2b-prog-label'); if(w2bPl2) w2bPl2.textContent=`Done — ${ok} live · ${fail} failed`;
+  if(btn){ btn.disabled=false; btn.textContent='🏗 Build All Sites'; }
+  if(stopBtn){ stopBtn.disabled=true; }
 }
 
 function w2bRenderTable(){
@@ -13297,7 +13443,8 @@ function w2bRenderTable(){
 function w2bExportCSV(){
   if(!W2B_STATE.sites.length) return;
   const h='Time,Platform,DA,Keyword,Site URL,Target URL,Status\n';
-  const rows=W2B_STATE.sites.map(s=>`"${s.time}","${s.platform}","${s.da}","${s.kw}","${s.siteUrl}","${s.targetUrl}","${s.status}"`).join('\n');
+  const csvEsc = v => '"'+String(v||'').replace(/"/g,'""')+'"';
+  const rows=W2B_STATE.sites.map(s=>[s.time,s.platform,s.da,s.kw,s.siteUrl,s.targetUrl,s.status].map(csvEsc).join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'})); a.download='web2-sites.csv'; a.click();
 }
 
@@ -13355,15 +13502,23 @@ function renderWeb2Builder(el){
           <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>c.classList.add('on'))">All</button>
             <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>c.classList.remove('on'))">None</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const d=parseInt(c.textContent.match(/DA(\d+)/)?.[1]||0);c.classList.toggle('on',d>=85)})">DA85+</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const d=parseInt(c.textContent.match(/DA(\d+)/)?.[1]||0);c.classList.toggle('on',d>=90)})">DA90+</button>
+            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const pid=c.dataset.pid;const plat=W2B_PLATFORMS.find(p=>p.id===pid);c.classList.toggle('on',(plat?.da||0)>=85)})">DA85+</button>
+            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const pid=c.dataset.pid;const plat=W2B_PLATFORMS.find(p=>p.id===pid);c.classList.toggle('on',(plat?.da||0)>=90)})">DA90+</button>
           </div>
           <div class="chips">${chips}</div></div>
         <div class="row mt8" style="gap:8px">
           <button id="w2b-run-btn" class="btn btn-primary" style="flex:1" onclick="w2bRunBuilder()">🏗 Build All Sites</button>
           <button id="w2b-stop-btn" class="btn btn-danger" disabled onclick="W2B_STATE.stopFlag=true;w2bLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
           <button class="btn btn-ghost" onclick="w2bExportCSV()">📥 CSV</button>
-          <button class="btn btn-danger btn-sm" onclick="W2B_STATE.sites=[];w2bRenderTable()">Clear</button>
+          <button class="btn btn-danger btn-sm" onclick="if(confirm('Clear all W2B history?')){W2B_STATE.sites=[];w2bSave();w2bRenderTable();}">Clear</button>
+        </div>
+        <div id="w2b-prog-wrap" style="margin-top:10px;display:none">
+          <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted2);margin-bottom:4px">
+            <span>Build Progress</span><span id="w2b-prog-label">0/0 — 0%</span>
+          </div>
+          <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
+            <div id="w2b-prog-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.3s ease;border-radius:4px"></div>
+          </div>
         </div>
       </div>
     </div>

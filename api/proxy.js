@@ -12,6 +12,22 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT = 25000;
 const MAX_REDIRECTS = 5;
 
+// Platforms that need browser-like Origin/Referer spoofing to not get blocked
+const ORIGIN_SPOOF_MAP = {
+  'api.strikingly.com':      { origin: 'https://www.strikingly.com',      referer: 'https://www.strikingly.com/' },
+  'www.strikingly.com':      { origin: 'https://www.strikingly.com',      referer: 'https://www.strikingly.com/' },
+  'www.site123.com':         { origin: 'https://www.site123.com',         referer: 'https://www.site123.com/login' },
+  'www.weebly.com':          { origin: 'https://www.weebly.com',          referer: 'https://www.weebly.com/' },
+  'users.wix.com':           { origin: 'https://www.wix.com',             referer: 'https://www.wix.com/' },
+  'www.tumblr.com':          { origin: 'https://www.tumblr.com',          referer: 'https://www.tumblr.com/register' },
+  'www.reddit.com':          { origin: 'https://www.reddit.com',          referer: 'https://www.reddit.com/register' },
+  'www.quora.com':           { origin: 'https://www.quora.com',           referer: 'https://www.quora.com/' },
+  'dev.to':                  { origin: 'https://dev.to',                  referer: 'https://dev.to/enter' },
+  'gql.hashnode.com':        { origin: 'https://hashnode.com',            referer: 'https://hashnode.com/' },
+  'public-api.wordpress.com':{ origin: 'https://wordpress.com',           referer: 'https://wordpress.com/start' },
+  'medium.com':              { origin: 'https://medium.com',              referer: 'https://medium.com/' },
+};
+
 function isSafeUrl(urlStr) {
   try {
     const u = new URL(urlStr);
@@ -19,6 +35,21 @@ function isSafeUrl(urlStr) {
     const host = u.hostname.toLowerCase();
     return !BLOCKED_HOSTS.some(b => host === b || host.startsWith(b));
   } catch { return false; }
+}
+
+// Resolve the body to send upstream.
+// Handles 3 cases:
+//   1. String already (URL-encoded form data or pre-serialized JSON) → send as-is
+//   2. Object → JSON.stringify it
+//   3. undefined/null → no body
+function resolveBody(bodyToSend, contentType) {
+  if (bodyToSend === undefined || bodyToSend === null) return undefined;
+  if (typeof bodyToSend === 'string') return bodyToSend; // already serialized — do NOT double-stringify
+  if (contentType && /x-www-form-urlencoded/.test(contentType)) {
+    // Object sent but content-type is form — convert to URL-encoded string
+    return new URLSearchParams(bodyToSend).toString();
+  }
+  return JSON.stringify(bodyToSend); // Object → JSON
 }
 
 // Manual redirect follower so we can detect + report redirects to the frontend.
@@ -94,30 +125,38 @@ export default async function handler(req, res) {
   const timer = setTimeout(() => controller.abort(), timeout + 3000);
 
   try {
+    // Determine content-type — prefer what the frontend sent, fall back to JSON for object bodies
+    const frontendCt = extraHeaders['Content-Type'] || extraHeaders['content-type'] || '';
+    const isObjectBody = bodyToSend !== undefined && typeof bodyToSend !== 'string';
+    const effectiveCt = frontendCt || (isObjectBody ? 'application/json' : 'application/x-www-form-urlencoded');
+
+    // Resolve origin spoof headers for this hostname
+    let hostname = '';
+    try { hostname = new URL(targetUrl).hostname; } catch {}
+    const spoof = ORIGIN_SPOOF_MAP[hostname] || null;
+
     const headers = {
       'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
       'Cache-Control':   'no-cache',
+      // Inject origin spoof BEFORE extraHeaders so frontend can override if needed
+      ...(spoof ? { 'Origin': spoof.origin, 'Referer': spoof.referer } : {}),
       ...extraHeaders,  // frontend headers win (Referer, Content-Type, Origin, etc.)
     };
 
+    // Set content-type for methods that send a body
+    if (['POST', 'PUT', 'PATCH'].includes(method) && bodyToSend !== undefined) {
+      if (!headers['Content-Type'] && !headers['content-type']) {
+        headers['Content-Type'] = effectiveCt;
+      }
+    }
+
     const fetchOpts = { method, signal: controller.signal, headers };
 
+    // ── Resolve body — THE FIX: strings pass through, objects get serialized once ──
     if (bodyToSend !== undefined && ['POST', 'PUT', 'PATCH'].includes(method)) {
-      if (typeof bodyToSend === 'string') {
-        // URL-encoded string (legacy wp-comments-post.php)
-        fetchOpts.body = bodyToSend;
-        if (!headers['Content-Type'] && !headers['content-type']) {
-          headers['Content-Type'] = 'application/x-www-form-urlencoded';
-        }
-      } else {
-        // Object (WP REST API JSON payload)
-        fetchOpts.body = JSON.stringify(bodyToSend);
-        if (!headers['Content-Type'] && !headers['content-type']) {
-          headers['Content-Type'] = 'application/json';
-        }
-      }
+      fetchOpts.body = resolveBody(bodyToSend, headers['Content-Type'] || headers['content-type'] || '');
     }
 
     const { resp: upstream, redirected, finalUrl } = await fetchFollowingRedirects(

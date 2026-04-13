@@ -12525,6 +12525,8 @@ async function acServerRegister(pid, username, password, captchaKey, useMailTm, 
   const base = acGetVercelBase();
   if(!base) throw new Error('Vercel Backend URL not set — go to Settings and enter your deployed URL (e.g. https://seoparapro.vercel.app)');
 
+  const secret = settingGet('vercel_secret')||'';
+
   const payload = {
     platform:   pid,
     username,
@@ -12534,9 +12536,12 @@ async function acServerRegister(pid, username, password, captchaKey, useMailTm, 
     autoVerify: !!autoVerify,
   };
 
+  const headers = { 'Content-Type': 'application/json' };
+  if(secret) headers['X-API-Key'] = secret;
+
   const resp = await fetch(`${base}/api/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(180000), // 3-min max — server polls inbox up to 90s
   });
@@ -12566,7 +12571,8 @@ function acGenUsername(base){
   const suffix = Math.floor(Math.random()*9000+1000);
   const adjectives = ['pro','expert','master','ace','elite','prime','alpha','digital','smart','peak'];
   const adj = adjectives[Math.floor(Math.random()*adjectives.length)];
-  const clean = (base||'user').toLowerCase().replace(/[^a-z0-9]/g,'');
+  // Strip everything non-alphanumeric, truncate to 12 chars, fall back to 'user'
+  const clean = (base||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,12) || 'user';
   return `${clean}${adj}${suffix}`;
 }
 
@@ -12751,7 +12757,7 @@ function renderAccountCreator(el){
         <div class="card-title">⚙ Registration Configuration</div>
         <div class="grid2">
           <div class="fg"><label class="lbl">Base Username</label>
-            <input type="text" id="ac-username" placeholder="seouser" /></div>
+            <input type="text" id="ac-username" placeholder="seouser" value="seouser" /></div>
           <div class="fg"><label class="lbl">Accounts per Platform <span class="xs tm">(max 20)</span></label>
             <input type="number" id="ac-count" value="1" min="1" max="20" /></div>
         </div>

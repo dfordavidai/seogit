@@ -1,31 +1,8 @@
 {
-  "version": 2,
-  "framework": null,
   "functions": {
-    "api/register.js": {
-      "maxDuration": 180,
-      "memory": 1024
-    },
-    "api/universal-register.js": {
-      "maxDuration": 180,
-      "memory": 1024
-    },
-    "api/click-link.js": {
-      "maxDuration": 60,
-      "memory": 512
+    "api/*.js": {
+      "memory": 1024,
+      "maxDuration": 300
     }
-  },
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        { "key": "Access-Control-Allow-Origin", "value": "*" },
-        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, X-API-Key" }
-      ]
-    }
-  ],
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/$1" }
-  ]
+  }
 }

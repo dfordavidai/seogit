@@ -1,10 +1,14 @@
 {
   "name": "seo-parasite-pro-backend",
   "version": "1.0.0",
-  "description": "Vercel backend for SEO Parasite Pro v17 — CORS proxy, captcha, ping, indexing",
-  "private": true,
-  "engines": { "node": ">=18" },
+  "description": "Vercel backend for SEO Parasite Pro v18 — Account Creator APIs",
+  "type": "module",
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    "@sparticuz/chromium": "^123.0.0",
+    "node-fetch": "^3.3.2",
+    "playwright-core": "^1.44.0"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }

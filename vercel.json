@@ -1,8 +1,16 @@
 {
   "functions": {
-    "api/*.js": {
-      "memory": 1024,
+    "api/universal-register.js": {
+      "memory": 3008,
       "maxDuration": 300
+    },
+    "api/register.js": {
+      "memory": 1024,
+      "maxDuration": 180
+    },
+    "api/*.js": {
+      "memory": 512,
+      "maxDuration": 60
     }
   }
 }
